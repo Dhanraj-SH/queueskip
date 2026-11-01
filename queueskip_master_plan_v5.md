@@ -1,8 +1,8 @@
-# QUEUESKIP: COMPLETE MASTER PLAN v5 (TypeScript, backend first, then frontend)
+# QUEUESKIP: COMPLETE MASTER PLAN v6 (TypeScript, backend first, full database design)
 
 A full stack movie discovery and ticket booking platform. Users sign up (email with verification, or Google), explore movies with cast, reviews and recommendations, pick a showtime and seats, apply a coupon, pay, and get a QR ticket. Hot releases are protected by a fair waiting room, hence the name.
 
-**This file replaces v4 and every earlier plan file.** What changed in v5: the language is now **TypeScript (strict)** across the backend, the `shared` package and the frontend. The design, the weekly order (backend first, then frontend) and the models-first routine are unchanged. Sections 3, 4, 6, 7, 9, 11, 14, 17, 18 and 19 changed.
+**This file replaces v5 and every earlier plan file.** What changed in v6: **section 9 is now a full database design** (collections, fields, embedded versus referenced choices, every index with the query it serves, transactions, invariants, retention, example documents). Along the way the design fixed one inconsistency: seats are sold only when payment is confirmed, not when the order is created. TypeScript, the weekly order and everything else are unchanged.
 
 Tags: **[DECIDED]** settled so you do not have to think about it, **[PLANNED]** not built yet. Reasons are in *italics*. Targets are goals to measure against, not results.
 
@@ -138,7 +138,7 @@ queueSkip/
 │   │   ├── models/        User.ts, OAuthAccount.ts, EmailToken.ts, Movie.ts, Person.ts, Review.ts, Watchlist.ts,
 │   │   │                  Theatre.ts, Screen.ts, Show.ts, ShowSeat.ts, Order.ts, Payment.ts, PaymentEvent.ts,
 │   │   │                  Ticket.ts, Coupon.ts, CouponRedemption.ts, Offer.ts, Refund.ts, IdempotencyKey.ts,
-│   │   │                  OutboxEvent.ts, UserMovieSignal.ts
+│   │   │                  OutboxEvent.ts, UserMovieSignal.ts, ReviewReport.ts, MovieEmbedding.ts, ProcessedBatch.ts
 │   │   ├── services/      authService.ts, holdService.ts, orderService.ts, orderStateMachine.ts, pricingService.ts,
 │   │   │                  couponService.ts, reviewService.ts, recommendationService.ts, aiSearchService.ts
 │   │   ├── accessors/     holdAccessor.ts, seatAccessor.ts, orderAccessor.ts, couponAccessor.ts, counterAccessor.ts
@@ -320,53 +320,425 @@ export default mongoose.model('ShowSeat', showSeatSchema);
 - **User text** (reviews, bios) is stored as plain text and rendered as text.
 - **Wrong ids:** every `:id` path parameter is checked with `mongoose.Types.ObjectId.isValid` before any query.
 
-## 9. DATA MODEL (Mongoose collections)
+## 9. DATABASE DESIGN
 
-Each model is a TypeScript file that exports its schema-inferred record type (`InferSchemaType`), as in the template in section 7. Services and accessors use those types, never plain `any` documents.
+This section is the single reference for what is stored, where, and why. Each model you write in Weeks 1 to 11 comes from here. Build one module at a time, but **design the indexes from the queries in 9.6**, not from the field list.
 
-Indexes are listed as `unique` or `index`. Embed what is read together; keep separate what grows or is queried alone.
+### 9.1 Principles
 
+1. **MongoDB holds durable truth. Redis holds ephemeral state** (seat holds, rate-limit buckets, waiting room, Bloom filters, write-behind buffers, caches). The few critical Redis structures (holds, queue) are always double-checked by MongoDB before money or seats change.
+2. **Design from queries.** Every index in this section is justified by an access pattern in 9.6. An index with no query is cost without benefit.
+3. **Embed** when the data is read together with its parent, is small and bounded, and changes with the parent. **Reference** when it grows without bound, is queried on its own, or is updated concurrently.
+4. **Snapshot** what must never change retroactively. An order keeps the movie title, theatre name, seat labels and prices as they were at purchase.
+5. **Denormalize only with a named owner** of the copy (who keeps it correct, and how it is repaired).
+6. **No unbounded arrays.** Every embedded array below has a stated maximum.
+7. **Types:** ids are `ObjectId`; money is an integer in minor units (paise) plus `currency`; times are `Date` in UTC; enums are strings taken from `shared/statuses`; "no value" is an explicit `null`.
+8. **Normalize before storing** anything used for uniqueness: emails lowercased and trimmed, coupon codes uppercased.
+9. Every collection has `createdAt` and `updatedAt` (Mongoose `timestamps: true`) unless noted.
+10. **Schema evolution:** additive changes only; `schemaVersion` on long-lived documents (`User`, `Order`); indexes are created by a script in production (`autoIndex: false`), and by `syncIndexes()` in development and tests.
+11. Typical documents stay under about 16 KB (the hard limit is 16 MB).
+
+### 9.2 What lives where
+
+| Data | Store | Why |
+|---|---|---|
+| Users, catalog, theatres, shows, orders, payments, tickets, coupons, reviews | MongoDB | durable, queryable, transactional |
+| A seat that is **held** | Redis `hold:{showId}:{seatId}` (TTL) | ephemeral, atomic Lua, self-expiring. MongoDB never stores `HELD` |
+| A seat that is **sold** | MongoDB `ShowSeat.status = 'SOLD'` | durable, protected by a conditional update |
+| Rate-limit buckets, waiting room, admission tokens | Redis (critical) | fast, per-request atomic |
+| Idempotency | Redis lock while in progress, MongoDB `IdempotencyKey` as the record (TTL 24 h) | lock for speed, record for correctness |
+| Job queues | Redis (critical), via BullMQ | retries and delays built in |
+| Outbox | MongoDB `OutboxEvent`, written **in the same transaction** as the order change | this is what makes "PAID" and "ticket job queued" consistent |
+| Cached movie pages, similar lists, trending, recommendations, AI results | Redis (cache) | rebuildable |
+| Bloom filters | Redis (cache) | rebuilt nightly from MongoDB |
+| View-count buffer | Redis (critical) `wb:*`, final value in `Movie.viewCount` | write-behind |
+| Embeddings | MongoDB `MovieEmbedding` | large vectors kept out of normal movie reads |
+| Review aggregates | MongoDB `Movie.ratingSum`, `ratingCount`, `ratingAvg` | updated atomically, never computed per page view |
+| Genre list | a constant in `shared/genres.ts` | about 20 fixed values do not need a collection |
+
+### 9.3 Relationship diagram
+
+```mermaid
+erDiagram
+  USER ||--o{ OAUTH_ACCOUNT : has
+  USER ||--o{ EMAIL_TOKEN : receives
+  USER ||--o{ REVIEW : writes
+  USER ||--o{ WATCHLIST : keeps
+  USER ||--o{ USER_MOVIE_SIGNAL : generates
+  USER ||--o{ THEATRE : manages
+  USER ||--o{ ORDER : places
+  MOVIE ||--o{ REVIEW : receives
+  MOVIE ||--o{ WATCHLIST : "listed in"
+  MOVIE ||--o{ USER_MOVIE_SIGNAL : "subject of"
+  MOVIE ||--o| MOVIE_EMBEDDING : has
+  MOVIE ||--o{ SHOW : "screened as"
+  PERSON }o--o{ MOVIE : "cast and crew (embedded in MOVIE)"
+  REVIEW ||--o{ REVIEW_VOTE : has
+  REVIEW ||--o{ REVIEW_REPORT : has
+  THEATRE ||--o{ SCREEN : has
+  SCREEN ||--o{ SHOW : hosts
+  SHOW ||--o{ SHOW_SEAT : generates
+  SHOW ||--o{ ORDER : "booked in"
+  ORDER ||--o{ PAYMENT : "paid by"
+  PAYMENT ||--o{ PAYMENT_EVENT : "reported by"
+  ORDER ||--o{ TICKET : issues
+  SHOW_SEAT ||--o| TICKET : admits
+  ORDER ||--o| REFUND : "may have"
+  ORDER ||--o| COUPON_REDEMPTION : uses
+  COUPON ||--o{ COUPON_REDEMPTION : "redeemed as"
+  OFFER }o--o| COUPON : promotes
+  ORDER ||--o{ OUTBOX_EVENT : emits
 ```
-User            name, email (unique), emailVerified, passwordHash (null for Google-only), role USER|MANAGER|ADMIN,
-                tokenVersion, createdAt
-OAuthAccount    userId, provider, providerUserId (Google "sub"), email      unique(provider, providerUserId)
-EmailToken      userId, type VERIFY|RESET, tokenHash (unique), expiresAt (TTL index), usedAt
 
-Movie           title, synopsis, runtimeMin, language, releaseDate, certification, posterUrl, trailerUrl, status,
-                genres [String], cast [{ personId, name, characterName, billingOrder }], crew [{ personId, name, job }],
-                ratingSum, ratingCount, ratingAvg, viewCount, embedding [Number], embeddingModel
-                indexes: text(title, synopsis), (status, releaseDate), genres
-Person          name, bio, photoUrl
-Review          movieId, userId, rating 1-10, title, body, helpfulCount, verifiedViewer, createdAt   unique(movieId, userId)
-ReviewVote      reviewId, userId                                            unique(reviewId, userId)
-Watchlist       userId, movieId, createdAt                                  unique(userId, movieId)
-UserMovieSignal userId, movieId, type, weight, createdAt                    index(userId, createdAt)
+### 9.4 Embedded or referenced
 
-Theatre         managerId, name, city, address
-Screen          theatreId, name, layout { sections: [{ name, rows, seatsPerRow, tier }] }
-Show            movieId, screenId, theatreId, startsAt, endsAt, status, highDemand, priceTiers [{ tier, priceMinor }]
-                indexes: (movieId, startsAt), (theatreId, startsAt)
-ShowSeat        showId, section, row, number, tier, priceMinor, status AVAILABLE|SOLD, orderId
-                unique(showId, section, row, number); index(showId, status)
+| Relationship | Choice | Reason | Bound |
+|---|---|---|---|
+| Movie to genres | embedded string array | tiny, filtered by value | at most 6 |
+| Movie to cast and crew | embedded `{ personId, name, ... }` | always shown with the movie | cast at most 50, crew at most 20 |
+| Movie to reviews | **referenced** (`Review`) | unbounded, paged, sorted | none |
+| Movie to embedding | **referenced** (`MovieEmbedding`) | a vector of hundreds of numbers would bloat every movie read | one per movie |
+| Screen to layout | embedded | read with the screen | at most 20 sections |
+| Show to price tiers | embedded | read with the show | at most 6 |
+| Show to seats | **referenced** (`ShowSeat`) | one document per seat, updated concurrently | about 100 to 500 per show |
+| Order to items | embedded | always read with the order, written atomically with it | at most 6 |
+| Order to history | embedded | bounded by the state machine | at most 20 |
+| Order to payments | **referenced** | several attempts, webhooks arrive independently | few |
+| Order to tickets | **referenced** | created later by a worker, scanned independently | at most 6 |
+| Review to votes | **referenced**, `helpfulCount` copied onto the review | one vote per user | unbounded |
+| Coupon to redemptions | **referenced**, `usedCount` copied onto the coupon | audit trail and uniqueness | unbounded |
+| User to Google identities | **referenced** (`OAuthAccount`) | lookup by Google `sub` | few |
 
-Order           userId, showId, status, items [{ showSeatId, priceMinor }], subtotalMinor, feeMinor, discountMinor,
-                totalMinor, currency, couponId, holdId, expiresAt, history [{ from, to, reason, at }], createdAt
-                index(userId, createdAt)
-Payment         orderId, provider, providerRef (unique), status, amountMinor, createdAt
-PaymentEvent    providerEventId (unique), payload, processedAt              (webhook dedupe)
-Refund          orderId, paymentId, status, amountMinor
-Ticket          orderId, showSeatId, qrToken, usedAt                        unique(orderId, showSeatId)
-Coupon          code (unique), type PERCENT|FLAT, value, maxDiscountMinor, minOrderMinor, validFrom, validTo,
-                maxTotalUses, usedCount, maxUsesPerUser, firstBookingOnly, rules { movieIds, theatreIds, days },
-                enabled, ownerTheatreId
-CouponRedemption couponId, userId, orderId, status RESERVED|COMMITTED|RELEASED   unique(couponId, orderId)
-Offer           title, description, couponId, rules, validFrom, validTo
+### 9.5 Collections
 
-IdempotencyKey  userId, key, endpoint, requestHash, response, createdAt (TTL 24h)   unique(userId, key, endpoint)
-OutboxEvent     type, payload, createdAt, publishedAt                       (TTL after published)
+Notation: `Type`, `Type | null`, `[Type]` for an array. "Indexes" lists every index and the reason.
+
+#### Identity
+
+**User**
+```
+name            String  (2 to 60)
+email           String  (lowercase, trimmed)
+emailVerified   Boolean (default false)
+passwordHash    String | null            null for Google-only accounts
+role            'USER' | 'MANAGER' | 'ADMIN'      (default 'USER')
+status          'ACTIVE' | 'SUSPENDED' | 'DELETED' (default 'ACTIVE')
+tokenVersion    Number  (default 0)      bump to end every session
+lastLoginAt     Date | null
+schemaVersion   Number  (default 1)
+```
+Indexes: `unique(email)` (login, registration check). Never returned to clients: `passwordHash`, `tokenVersion`. A `DELETED` user is anonymized (see 9.8).
+
+**OAuthAccount**: `userId`, `provider ('GOOGLE')`, `providerUserId` (Google `sub`), `email`. Indexes: `unique(provider, providerUserId)` (sign-in lookup), `index(userId)`.
+
+**EmailToken**: `userId`, `type ('VERIFY' | 'RESET')`, `tokenHash` (SHA-256 hex, the raw token is never stored), `expiresAt`, `usedAt | null`. Indexes: `unique(tokenHash)`; `index(userId, type, createdAt -1)` (find the latest to invalidate older ones); **TTL on `expiresAt`** (`expireAfterSeconds: 604800`, keeps a week of history).
+
+#### Catalog
+
+**Movie**
+```
+title           String  (1 to 200)
+synopsis        String  (up to 3000)
+runtimeMin      Number
+language        String  (ISO 639-1, for example 'hi')
+releaseDate     Date
+certification   String  ('U', 'UA', 'A', ...)
+posterUrl       String | null
+trailerUrl      String | null
+status          'UPCOMING' | 'NOW_SHOWING' | 'ENDED'
+genres          [String]    at most 6, values from shared/genres
+cast            [{ personId, name, characterName, billingOrder }]   at most 50
+crew            [{ personId, name, job }]                           at most 20
+ratingSum       Number (0)   ratingCount Number (0)   ratingAvg Number (0)
+viewCount       Number (0)   written by the write-behind flusher
+```
+Indexes: `text(title:10, 'cast.name':5, synopsis:3)` (search); `(status, releaseDate -1)` (home page lists); `(genres, status, ratingAvg -1)` (genre rows); `(language, status)`; `(cast.personId)` and `(crew.personId)` (filmography).
+Rating update is one atomic pipeline update, so the average always matches the totals:
+```js
+Movie.updateOne({ _id: movieId }, [
+  { $set: { ratingSum: { $add: ['$ratingSum', delta] }, ratingCount: { $add: ['$ratingCount', countDelta] } } },
+  { $set: { ratingAvg: { $cond: [{ $gt: ['$ratingCount', 0] }, { $divide: ['$ratingSum', '$ratingCount'] }, 0] } } },
+]);
+```
+Copies: `cast.name` and `crew.name` copy `Person.name`. Owner of the copy: `PUT /movies/:id/cast` writes it, and a script `syncPersonNames` repairs it if a person is renamed.
+
+**Person**: `name`, `bio`, `photoUrl | null`, `birthDate | null`. Indexes: `text(name)`; `index(name)` for prefix lookups.
+
+**MovieEmbedding**: `movieId`, `vector [Number]`, `dimensions`, `model`, `modelVersion`, `sourceHash` (hash of the text that was embedded, so unchanged movies are not re-embedded). Indexes: `unique(movieId)`. Loaded in bulk by the similarity job and cached; never part of a normal movie response.
+
+#### Engagement
+
+**Review**
+```
+movieId, userId
+userName        String   copy of User.name at write time; 'Deleted user' after account deletion
+rating          Number   integer 1 to 10
+title           String   (up to 100)
+body            String   (up to 2000, plain text)
+helpfulCount    Number (0)     reportCount Number (0)
+verifiedViewer  Boolean (false)   computed from orders, never from the client
+status          'VISIBLE' | 'HIDDEN' (default 'VISIBLE')
+```
+Indexes: `unique(movieId, userId)` (one review per user, upsert target); `(movieId, status, createdAt -1)` (recent); `(movieId, status, helpfulCount -1)` (helpful); `(userId, createdAt -1)` (my reviews); `partial (status, reportCount -1)` where `reportCount > 0` (moderation queue).
+
+**ReviewVote**: `reviewId`, `userId`. Indexes: `unique(reviewId, userId)`, `index(userId)`. `helpfulCount` changes by `$inc` only when the vote insert or delete actually happened.
+
+**ReviewReport**: `reviewId`, `userId`, `reason`, `note`, `status ('OPEN' | 'RESOLVED')`. Indexes: `unique(reviewId, userId)`, `(status, createdAt)`.
+
+**Watchlist**: `userId`, `movieId`, `createdAt` (no `updatedAt`). Indexes: `unique(userId, movieId)` (add is an upsert; status check), `(userId, createdAt -1)` (list).
+
+**UserMovieSignal**: `signalId` (generated by the API, makes batch inserts idempotent), `userId`, `movieId`, `type ('VIEW' | 'WATCHLIST' | 'BOOKED' | 'RATED_HIGH' | 'RATED_LOW')`, `weight`, `createdAt`. Indexes: `unique(signalId)`, `(userId, createdAt -1)` (build a taste profile), **TTL on `createdAt`** (180 days).
+
+#### Venues and shows
+
+**Theatre**: `managerId`, `name`, `city`, `address`, optional `location` (GeoJSON point, with a `2dsphere` index only if you add "near me"). Indexes: `(city, name)`, `(managerId)`.
+
+**Screen**: `theatreId`, `name`, `layout { sections: [{ name, rows, seatsPerRow, tier }] }` (at most 20 sections), `totalSeats` (computed on save), `showWriteVersion` (Number, see the overlap rule below). Indexes: `unique(theatreId, name)`.
+
+**Show**
+```
+movieId, screenId
+theatreId       copy from Screen (owner: show creation)
+startsAt, endsAt   Date   endsAt = startsAt + runtime + cleaning buffer
+status          'SCHEDULED' | 'ON_SALE' | 'CANCELLED' | 'COMPLETED'
+highDemand      Boolean (false)   turns the waiting room on
+priceTiers      [{ tier, priceMinor }]   at most 6
+currency        String ('INR')
+seatCounts      { total, sold }          sold is $inc'd in the confirm-payment transaction
+```
+Indexes: `(movieId, status, startsAt)` (showtimes for a movie), `(theatreId, startsAt)` (theatre schedule), `(screenId, startsAt)` (overlap check).
+**Overlap rule.** A unique index cannot forbid overlapping time ranges, and two managers can create overlapping shows at the same instant. Create a show inside a transaction that first does `Screen.updateOne({ _id: screenId }, { $inc: { showWriteVersion: 1 } }, { session })`. Two concurrent creators then conflict on that document, one retries, and the overlap query (`screenId`, not cancelled, `startsAt < newEnd`, `endsAt > newStart`) runs on a consistent view.
+
+**ShowSeat**
+```
+showId, section, row, number
+seatLabel       String   for example 'A-5' (copy for display and snapshots)
+tier            String   priceMinor Number
+status          'AVAILABLE' | 'SOLD'
+orderId         ObjectId | null          soldAt Date | null
+expireAt        Date                     show.endsAt + 90 days
+```
+Indexes: `unique(showId, section, row, number)` (no duplicate seats, last safety net); `(showId, status)` (seat map, availability counts); **TTL on `expireAt`** (old seats are purged; orders and tickets keep their own snapshot of the label, so nothing is lost). About 300 documents per show is normal.
+
+#### Commerce
+
+**Order**
+```
+userId, showId
+snapshot        { movieId, movieTitle, theatreId, theatreName, screenName, startsAt }
+items           [{ showSeatId, seatLabel, tier, priceMinor }]     at most 6
+subtotalMinor, feeMinor, discountMinor, totalMinor      integers
+currency        String
+couponId        ObjectId | null          couponCode String | null
+holdId          String                   the Redis hold this order was created from
+status          'PENDING_PAYMENT' | 'PAID' | 'CONFIRMED' | 'EXPIRED' | 'CANCELLED' | 'FAILED' | 'REFUND_PENDING' | 'REFUNDED'
+expiresAt       Date                     end of the payment window
+paidAt, cancelledAt   Date | null
+history         [{ from, to, reason, at }]                        at most 20
+schemaVersion   Number (1)
+```
+Indexes: `(userId, createdAt -1)` (my orders); `partial (status, expiresAt)` where `status = 'PENDING_PAYMENT'` (the expiry sweeper only scans open orders); `(showId, status)` (show cancellation, sales counts); `(status, createdAt -1)` (admin views).
+Invariant: `totalMinor = subtotalMinor + feeMinor - discountMinor`, `discountMinor <= subtotalMinor + feeMinor`, `totalMinor >= 0`. Computed only by `pricingService`.
+
+**Payment**: `orderId`, `provider ('RAZORPAY')`, `providerOrderId`, `providerPaymentId | null`, `status ('CREATED' | 'SUCCEEDED' | 'FAILED' | 'REFUNDED')`, `amountMinor`, `currency`, `failureReason | null`. Indexes: `unique(providerOrderId)` (webhook lookup), `unique sparse (providerPaymentId)`, `(orderId)`.
+
+**PaymentEvent**: `providerEventId`, `type`, `payload` (raw body, size-limited), `status ('RECEIVED' | 'PROCESSED' | 'IGNORED' | 'FAILED')`, `receivedAt`, `processedAt | null`. Indexes: `unique(providerEventId)` (**webhook dedupe**, the insert fails on a replay); TTL on `receivedAt` (90 days).
+
+**Refund**: `orderId`, `paymentId`, `providerRefundId | null`, `amountMinor`, `reason ('SHOW_CANCELLED' | 'USER_CANCELLED' | 'LATE_PAYMENT_SEATS_TAKEN')`, `status ('PENDING' | 'PROCESSED' | 'FAILED')`, `attempts`. Indexes: `unique(orderId)` (one refund per order), `(status, createdAt)` (retry worker).
+
+**Ticket**
+```
+orderId, showId, showSeatId
+seatLabel       String
+ticketCode      String   short human-readable code
+qrJti           String   id inside the signed QR token
+usedAt          Date | null     usedByUserId ObjectId | null
+cancelledAt     Date | null
+```
+Indexes: `unique(orderId, showSeatId)` (the ticket worker is idempotent), `unique(ticketCode)`, `(showId, usedAt)` (door statistics). Scan is one atomic statement: `findOneAndUpdate({ _id, usedAt: null, cancelledAt: null }, { $set: { usedAt: now, usedByUserId } })`.
+
+**Coupon**
+```
+code               String  (uppercase)
+description        String
+type               'PERCENT' | 'FLAT'     value Number (1 to 100, or minor units)
+maxDiscountMinor   Number | null          minOrderMinor Number (0)
+validFrom, validTo Date
+maxTotalUses       Number | null          null means unlimited
+usedCount          Number (0)             counts RESERVED and COMMITTED redemptions
+firstBookingOnly   Boolean (false)
+rules              { movieIds [], theatreIds [], daysOfWeek [], tiers [] }     empty means unrestricted
+ownerTheatreId     ObjectId | null
+enabled            Boolean
+```
+Indexes: `unique(code)` (apply by code), `(enabled, validFrom, validTo)` (active offers), `(ownerTheatreId)`.
+**Per-user limit is fixed at one use per user** for this project. A higher limit would need a per-user counter document, so it is listed as future work.
+
+**CouponRedemption**: `couponId`, `userId`, `orderId`, `discountMinor`, `status ('RESERVED' | 'COMMITTED' | 'RELEASED')`, `isActive` (true for `RESERVED` and `COMMITTED`). Indexes: `unique(couponId, orderId)`; **`partial unique (couponId, userId)` where `isActive = true`** (this is what enforces one active use per user, even when two orders race); `(orderId)`.
+
+**Offer**: `title`, `description`, `couponId | null`, `autoRule | null` (for example 20 percent on Tuesdays, for auto-applied offers), `bannerUrl | null`, `sortOrder`, `validFrom`, `validTo`, `enabled`. Indexes: `(enabled, validFrom, validTo, sortOrder)`.
+
+**IdempotencyKey**: `userId`, `key`, `endpoint`, `requestHash`, `status ('IN_PROGRESS' | 'COMPLETED')`, `responseStatus`, `responseBody`. Indexes: `unique(userId, key, endpoint)`, **TTL on `createdAt`** (86,400 seconds).
+
+**OutboxEvent**: `type` (for example `order.paid`), `aggregateId` (the order id), `payload`, `published` (Boolean, false), `attempts`, `publishedExpireAt | null`. Indexes: `partial (published, createdAt)` where `published = false` (the publisher polls only unpublished rows); **TTL on `publishedExpireAt`** (set to now plus 7 days when published; documents without the field are never deleted).
+
+#### Operations
+
+**ProcessedBatch**: `batchId`, `kind ('viewCounts')`, `appliedAt`, `expireAt`. Indexes: `unique(batchId)` (inserted first by the write-behind flusher so a retried flush is skipped), **TTL on `expireAt`** (7 days).
+
+### 9.6 Access patterns and their indexes
+
+| Query | Collection | Index used | Notes |
+|---|---|---|---|
+| Log in by email | User | `unique(email)` | |
+| Find user by Google `sub` | OAuthAccount | `unique(provider, providerUserId)` | |
+| Verify or reset by token | EmailToken | `unique(tokenHash)` | hash the incoming token first |
+| Home page: now showing | Movie | `(status, releaseDate -1)` | paged |
+| Genre row, best rated | Movie | `(genres, status, ratingAvg -1)` | paged |
+| Search by text | Movie | text index | plus Bloom filter and cache for detail pages |
+| Movie detail by id | Movie | `_id` | cache-aside, Bloom filter first |
+| Filmography of a person | Movie | `(cast.personId)`, `(crew.personId)` | |
+| Reviews of a movie, recent or helpful | Review | `(movieId, status, createdAt -1)`, `(movieId, status, helpfulCount -1)` | paged |
+| Upsert my review | Review | `unique(movieId, userId)` | duplicate key means conflict |
+| Moderation queue | Review | partial `(status, reportCount -1)` | |
+| Is movie in my watchlist | Watchlist | `unique(userId, movieId)` | |
+| My taste signals | UserMovieSignal | `(userId, createdAt -1)` | limit to recent |
+| Showtimes for a movie in a city on a date | Show | `(movieId, status, startsAt)` then Theatre by id | two queries, one for shows and one `$in` for theatres |
+| Overlap check on a screen | Show | `(screenId, startsAt)` | inside the transaction with the screen version bump |
+| Seat map for a show | ShowSeat | `(showId, status)` | merged with Redis holds |
+| Sell seats | ShowSeat | `unique(showId, section, row, number)` and `_id` | conditional update |
+| My orders | Order | `(userId, createdAt -1)` | paged |
+| Expire unpaid orders | Order | partial `(status, expiresAt)` | sweeper |
+| Cancel a show: find paid orders | Order | `(showId, status)` | |
+| Payment from webhook | Payment | `unique(providerOrderId)` | |
+| Replayed webhook | PaymentEvent | `unique(providerEventId)` | insert fails on replay |
+| Apply a coupon | Coupon | `unique(code)` | atomic claim, then redemption insert |
+| Active offers | Offer, Coupon | `(enabled, validFrom, validTo, ...)` | cached |
+| Scan a ticket | Ticket | `_id` | one atomic update |
+| Publish outbox | OutboxEvent | partial `(published, createdAt)` | |
+| Retry refunds | Refund | `(status, createdAt)` | |
+
+**Rule:** before a module counts as done, run `explain('executionStats')` on its main queries and confirm an index scan (`IXSCAN`), with `totalDocsExamined` close to `nReturned`.
+
+### 9.7 Transactions, concurrency and consistency
+
+MongoDB transactions need the replica set. Keep them short (at most 6 seats), run them with `withTransaction` (it retries transient errors), and use `readConcern: 'snapshot'` and `writeConcern: { w: 'majority' }`. The connection string sets `retryWrites=true&w=majority`.
+
+**The confirm-payment transaction** (payment webhook, section 10.8). Seats are **not** sold when the order is created: between order creation and payment they exist only as Redis holds. Everything below happens in one transaction:
+1. `ShowSeat.updateMany({ showId, _id: { $in }, status: 'AVAILABLE' }, { $set: { status: 'SOLD', orderId, soldAt } })`. If `modifiedCount` does not equal the seat count, **abort**. The first confirmed payment wins; the other buyer goes to the refund path.
+2. `Order`: `PENDING_PAYMENT` to `PAID` (conditional on the current status), with a `history` entry.
+3. `Payment`: `CREATED` to `SUCCEEDED`.
+4. `CouponRedemption`: `RESERVED` to `COMMITTED`, if a coupon was used.
+5. `Show.seatCounts.sold` incremented.
+6. `OutboxEvent` inserted (`order.paid`).
+
+**Other transactions:** create a show (screen version bump, overlap check, show insert, seat generation in batches); apply a coupon (atomic `usedCount` claim plus the redemption insert); order expiry and cancellation (status change plus coupon release plus Redis hold release after commit).
+
+**Invariants and how each is enforced**
+
+| Invariant | Enforced by |
+|---|---|
+| A seat is sold at most once | conditional update plus the unique seat index |
+| One review per user per movie | `unique(movieId, userId)` |
+| One active coupon use per user | partial unique index on `CouponRedemption` |
+| A coupon never exceeds `maxTotalUses` | conditional `$inc` on `usedCount` |
+| A webhook is processed once | `unique(providerEventId)`, then conditional status updates |
+| One ticket per seat per order | `unique(orderId, showSeatId)` |
+| A ticket is admitted once | conditional update on `usedAt: null` |
+| Order totals add up | only `pricingService` writes them, and the state machine re-checks them |
+| Order status only moves forward | conditional update on the expected current status |
+| Rating average matches the reviews | atomic pipeline update, plus a nightly recompute |
+
+**Nightly reconciliation** (`reconciliationJob`): `Movie.ratingCount` and `ratingSum` against `Review`; `Coupon.usedCount` against active redemptions; `Show.seatCounts.sold` against `SOLD` seats; paid orders without tickets; orders stuck in `PENDING_PAYMENT` past `expiresAt`; Redis holds with no matching open order. It logs every difference and fixes the safe ones.
+
+### 9.8 Retention, deletion and privacy
+
+| Data | Kept | How |
+|---|---|---|
+| EmailToken | 7 days after expiry | TTL |
+| IdempotencyKey | 24 hours | TTL |
+| OutboxEvent | 7 days after publishing | TTL on `publishedExpireAt` |
+| PaymentEvent | 90 days | TTL |
+| ProcessedBatch | 7 days | TTL |
+| UserMovieSignal | 180 days | TTL |
+| ShowSeat | 90 days after the show ends | TTL on `expireAt` |
+| Orders, payments, refunds, tickets | kept (financial records) | none |
+| Reviews | kept, author anonymized on account deletion | update |
+
+**Account deletion** sets `User.status = 'DELETED'`, replaces `name` and `email` with placeholders (`deleted+<id>@invalid`), clears `passwordHash`, bumps `tokenVersion`, deletes `OAuthAccount`, `EmailToken`, `Watchlist` and `UserMovieSignal` rows, and sets `Review.userName` to `'Deleted user'`. Orders stay for the financial record, with the user reference intact but no personal data left on the user.
+
+### 9.9 Operations
+
+- **Connections:** one pooled connection per API process (`maxPoolSize` about 20 to 50), `serverSelectionTimeoutMS` and `maxTimeMS` set so a slow database fails requests instead of piling them up.
+- **Read preference:** primary for seats, orders, payments, coupons. `secondaryPreferred` is allowed for catalog reads (movies, reviews, showtimes) where a few seconds of staleness is fine. Never read seat status from a secondary.
+- **Indexes:** `autoIndex: false` in production; `npm run db:indexes` creates them (idempotent). Every new index states the query it serves.
+- **Seed data** (`backend/scripts/seed.ts`): deterministic (fixed random seed): about 50 movies, 100 people, 5 theatres, 12 screens, shows for the next 14 days with their seats, 20 users (one admin, two managers), a few coupons and offers. Factories in `test/helpers/factories.ts` build the same shapes for tests.
+- **Backups:** Atlas continuous backup or daily snapshots. Practise a restore once before you rely on it.
+
+### 9.10 Example documents
+
+`Show`:
+```json
+{
+  "_id": "665f1c2e8a1b2c3d4e5f6001",
+  "movieId": "665f1c2e8a1b2c3d4e5f5001",
+  "screenId": "665f1c2e8a1b2c3d4e5f4001",
+  "theatreId": "665f1c2e8a1b2c3d4e5f3001",
+  "startsAt": "2026-12-05T13:30:00.000Z",
+  "endsAt": "2026-12-05T16:15:00.000Z",
+  "status": "ON_SALE",
+  "highDemand": true,
+  "priceTiers": [{ "tier": "STANDARD", "priceMinor": 25000 }, { "tier": "PREMIUM", "priceMinor": 40000 }],
+  "currency": "INR",
+  "seatCounts": { "total": 240, "sold": 118 }
+}
 ```
 
-Use TTL indexes for `EmailToken`, `IdempotencyKey` and published `OutboxEvent`: MongoDB deletes them for you.
+`ShowSeat`:
+```json
+{
+  "showId": "665f1c2e8a1b2c3d4e5f6001",
+  "section": "PREMIUM", "row": "C", "number": 7, "seatLabel": "C-7",
+  "tier": "PREMIUM", "priceMinor": 40000,
+  "status": "SOLD", "orderId": "665f1c2e8a1b2c3d4e5f7001", "soldAt": "2026-12-04T09:12:44.000Z",
+  "expireAt": "2027-03-05T16:15:00.000Z"
+}
+```
+
+`Order` (after payment):
+```json
+{
+  "_id": "665f1c2e8a1b2c3d4e5f7001",
+  "userId": "665f1c2e8a1b2c3d4e5f2001",
+  "showId": "665f1c2e8a1b2c3d4e5f6001",
+  "snapshot": { "movieTitle": "Night Signal", "theatreName": "Orion Cinemas", "screenName": "Screen 2", "startsAt": "2026-12-05T13:30:00.000Z" },
+  "items": [
+    { "showSeatId": "665f1c2e8a1b2c3d4e5f8001", "seatLabel": "C-7", "tier": "PREMIUM", "priceMinor": 40000 },
+    { "showSeatId": "665f1c2e8a1b2c3d4e5f8002", "seatLabel": "C-8", "tier": "PREMIUM", "priceMinor": 40000 }
+  ],
+  "subtotalMinor": 80000, "feeMinor": 4000, "discountMinor": 8000, "totalMinor": 76000, "currency": "INR",
+  "couponCode": "WEEKEND10", "holdId": "h_7f3a9c",
+  "status": "PAID", "expiresAt": "2026-12-04T09:20:00.000Z", "paidAt": "2026-12-04T09:12:44.000Z",
+  "history": [
+    { "from": null, "to": "PENDING_PAYMENT", "reason": "order created", "at": "2026-12-04T09:10:02.000Z" },
+    { "from": "PENDING_PAYMENT", "to": "PAID", "reason": "payment confirmed", "at": "2026-12-04T09:12:44.000Z" }
+  ]
+}
+```
+
+### 9.11 Approximate sizes (estimates, measure with `Object.bsonsize`)
+
+| Collection | Typical document | Growth driver |
+|---|---|---|
+| Movie (without embedding) | 3 to 6 KB | catalog size (hundreds to thousands) |
+| MovieEmbedding | 6 to 12 KB | one per movie |
+| Review | about 1 KB | users times movies reviewed |
+| ShowSeat | about 250 bytes | shows times seats: 300 seats, 4 shows a day, 5 screens, 30 days is about 180,000 per theatre per month, purged after 90 days |
+| Order | 1.5 to 3 KB | bookings |
+| Ticket | about 400 bytes | seats sold |
+
+`ShowSeat` is the collection that grows fastest, which is why it has a TTL and the tightest indexes. If it ever outgrew one replica set, shard it by `showId` (hashed); orders would shard by `userId`. At project scale none of this is needed, but be able to say it.
+
 
 ## 10. FEATURE SPECIFICATIONS
 
@@ -507,8 +879,8 @@ PENDING_PAYMENT ──paid──► PAID ──tickets issued──► CONFIRMED
 ```
 - All transitions go through `orderStateMachine.ts`. Each is a conditional update (`findOneAndUpdate({ _id, status: expected }, ...)`), so two racing events cannot both win. A `null` result means someone else already moved it.
 - **Price is recomputed on the server:** seat prices plus convenience fee minus coupon discount (capped, never below zero). The order stores a price snapshot. Never trust a price from the client.
-- Creating an order extends the hold once to the payment window and sets `order.expiresAt`.
-- **Selling seats** runs in one MongoDB transaction: `ShowSeat.updateMany({ showId, _id: { $in }, status: 'AVAILABLE' }, { $set: { status: 'SOLD', orderId } }, { session })`. If `modifiedCount` does not equal the seat count, abort and return 409.
+- Creating an order validates the hold, extends it once to the payment window, and sets `order.expiresAt`. The order starts as `PENDING_PAYMENT`. **Seats stay held in Redis; they are sold only when payment is confirmed** (section 9.7).
+- **Selling seats** happens in the confirm-payment transaction (sections 9.7 and 10.8): `ShowSeat.updateMany({ showId, _id: { $in }, status: 'AVAILABLE' }, { $set: { status: 'SOLD', orderId, soldAt } }, { session })`. If `modifiedCount` does not equal the seat count, the transaction aborts and the payment goes to the refund path.
 - **Coupon rules** (checked when applied and again at order creation): exists and enabled, inside its validity window, minimum order met, movie/theatre/day rules match, per-user and global limits not exceeded, first-booking rule satisfied, one coupon per order.
 - **Atomic coupon claim:**
   ```js
@@ -532,8 +904,8 @@ GET  /api/tickets/:id                 own ticket with QR payload
 
 - Create a payment session for the order total with the order id as reference and a short expiry.
 - **Verify the webhook signature** on the raw body. **Dedupe** by the provider's event id (`PaymentEvent`, unique): providers deliver at least once and out of order.
-- In one transaction: payment `SUCCEEDED`, order `PENDING_PAYMENT → PAID`, and an `OutboxEvent` inserted. **Never trust the browser redirect** as proof of payment.
-- **Late payment:** the user pays after the hold expired. Try to re-sell the same seats with the conditional update. If free, confirm. If someone else took them, **refund automatically** and notify. Write an explicit test.
+- In one **confirm-payment transaction** (section 9.7): seats `AVAILABLE → SOLD`, payment `SUCCEEDED`, order `PENDING_PAYMENT → PAID`, coupon redemption `RESERVED → COMMITTED`, `Show.seatCounts.sold` incremented, and an `OutboxEvent` inserted. **Never trust the browser redirect** as proof of payment.
+- **Late payment:** the user pays after the hold expired. The confirm-payment transaction still runs its conditional seat update. If the seats are still `AVAILABLE`, the order is confirmed (the first confirmed payment wins). If someone else already bought them, the transaction aborts: **refund automatically** and notify. Write an explicit test.
 - **Transactional outbox:** a publisher moves unpublished outbox rows to the BullMQ queue and marks them published. *This keeps "order is PAID" and "ticket job queued" from drifting if the process crashes between the two.*
 - **Ticket worker:** consumes `order.paid`, creates one ticket per seat (unique `(orderId, showSeatId)` makes it idempotent), signs a QR token (JWT with `ticketId`, `showId`, expiry), renders the QR, sends the email.
 - **Scan:** verify the signature, then `Ticket.findOneAndUpdate({ _id, usedAt: null }, { $set: { usedAt: new Date() } })`. `null` means a duplicate scan. *One atomic statement prevents two doors admitting the same ticket.*
@@ -565,7 +937,7 @@ GET  /api/recommendations/trending?city=
 
 *Principle: AI enhances the catalog, it never replaces it. Every result is a real movie id from your database.*
 
-- **Embeddings:** a worker embeds each movie (title, synopsis, genres, top cast) and stores the vector with the model name and version. For a catalog of a few thousand movies, compute cosine similarity in Node and cache the result; use Atlas Vector Search only if you want it.
+- **Embeddings:** a worker embeds each movie (title, synopsis, genres, top cast) and stores the vector in `MovieEmbedding` with the model name and version. For a catalog of a few thousand movies, compute cosine similarity in Node and cache the result; use Atlas Vector Search only if you want it.
 - **Natural-language search** `POST /api/search/ai { query }`: the model returns JSON only (`genres`, `languages`, `maxRuntime`, `yearRange`, `moodText`). **Validate it with zod.** Run a MongoDB filter, then rank by vector similarity to `moodText`. Optionally return a one-line reason built from catalog fields only.
 - **Fallback:** on timeout (about 3 seconds), error or invalid JSON, run normal keyword search. The feature degrades, it never breaks.
 - **Controls:** cache by normalized query, rate limit per user, a daily token budget, log tokens and estimated cost. Treat the user's text as data, never as instructions. Send no personal data (names, emails) in prompts. Never execute anything the model returns.
@@ -812,7 +1184,7 @@ Cache-aside for movie list, detail, similar, trending and AI results with the TT
 
 ## 15. LOAD TESTS (record your real numbers)
 
-1. **Headline:** 5,000 virtual users compete for 200 seats through the balancer with 3 replicas. Exactly 200 sold, zero double bookings, every loser gets a clean 409.
+1. **Headline:** 5,000 virtual users compete for 200 seats through the balancer with 3 replicas. Each winner then pays through the signed-webhook script. Exactly 200 sold, zero double bookings, every loser gets a clean 409.
 2. **Coupon race:** 1,000 users, a coupon with 50 uses, exactly 50 redemptions.
 3. **Rate limit burst:** exact allow counts shared across replicas.
 4. **Hold expiry:** 1,000 holds expire, seats return, the sweeper finds nothing to repair.
@@ -846,7 +1218,7 @@ Set an AWS Budget alert before creating anything, and tear down costly resources
 **Order:** build the whole API first (Weeks 1 to 12), freeze it, then build the frontend (Weeks 13 to 16), then a buffer week (17). About 18 weeks, alongside DSA.
 
 **Routine for every backend module (models first):**
-1. Write the Mongoose **model** and its indexes (`models/<Name>.ts`).
+1. Write the Mongoose **model** and its indexes (`models/<Name>.ts`) from section 9.5. Every index must serve a query in section 9.6.
 2. **Model test:** required fields, enums, and each unique index rejects a duplicate.
 3. **Seed data** and a factory in `test/helpers/factories.ts`.
 4. **Service** (the rules).
@@ -873,7 +1245,7 @@ Set an AWS Budget alert before creating anything, and tear down costly resources
 - **Exit:** the whole flow works from `auth.http`; tests read the database after every write; logout bumps `tokenVersion` and old tokens stop working.
 
 ### Week 2: catalog, search, watchlist
-- **Models:** `Movie` (embedded genres, cast, crew), `Person`, `Watchlist`.
+- **Models:** `Movie` (embedded genres, cast, crew), `Person`, `Watchlist`. Genres are a constant list in `shared/genres.ts`, not a collection.
 - **Build:** `seed.ts` with about 50 fictional movies, list with filters and pagination, detail, cast, genres, `$text` search, admin create and edit and cast replace, watchlist REST with `{ inWatchlist }`, Redis cache-aside for list and detail.
 - **Exit:** search works, a cached detail request is visibly faster, duplicate watchlist add is handled, removing a missing item returns 404.
 
@@ -890,14 +1262,14 @@ Set an AWS Budget alert before creating anything, and tear down costly resources
 
 ### Week 5: orders and the state machine (core problem 2)
 - **Models:** `Order` (with `history`), `IdempotencyKey` (TTL index).
-- **Build:** `pricingService` (server-side), `orderStateMachine`, `idempotency` middleware, create order (extends the hold once), sell seats in a transaction with `modifiedCount` checked, expiry job, cancel.
-- **Tests:** double-click create order gives one order; two racing transitions; seat-sold-twice attempt; Redis killed mid-checkout.
-- **Exit:** a held seat becomes an order then `SOLD`, verified by database reads.
+- **Build:** `pricingService` (server-side), `orderStateMachine`, `idempotency` middleware, create order (validates the hold, extends it once, creates the order as `PENDING_PAYMENT`; the seats stay held in Redis and are sold only at payment confirmation in Week 6), expiry job, cancel.
+- **Tests:** double-click create order gives one order; two racing transitions (only one wins); a hold that expired cannot be turned into an order; Redis killed mid-checkout.
+- **Exit:** a held seat becomes a `PENDING_PAYMENT` order; MongoDB still shows the seat `AVAILABLE` and Redis still holds it; an expired order releases everything. Verified by database reads.
 
 ### Week 6: payments, tickets, workers
 - **Models:** `Payment`, `PaymentEvent` (unique event id), `Ticket`, `OutboxEvent`, `Refund`.
-- **Build:** Razorpay test-mode session, webhook with signature check and dedupe, late-payment handling, outbox and publisher, BullMQ queues, `ticketWorker` (QR), `emailWorker` (Mailpit), scan endpoint, `signWebhook.ts`.
-- **Exit:** the full booking flow works end to end from `.http` files and scripts; a replayed webhook changes nothing; a late payment is confirmed or refunded.
+- **Build:** Razorpay test-mode session, webhook with signature check and dedupe, the confirm-payment transaction (seats sold, order paid, payment succeeded, outbox row), late-payment handling, outbox and publisher, BullMQ queues, `ticketWorker` (QR), `emailWorker` (Mailpit), scan endpoint, `signWebhook.ts`.
+- **Exit:** the full booking flow works end to end from `.http` files and scripts; a replayed webhook changes nothing; a late payment is confirmed or refunded; two users confirming payment for the same seats gives exactly one sale and one automatic refund.
 
 ### Week 7: rate limiting, load balancing, first load tests
 - **Models:** none.
@@ -911,18 +1283,18 @@ Set an AWS Budget alert before creating anything, and tear down costly resources
 - **Exit:** tests for verified and unverified access, enumeration-safe responses and the pre-hijacking scenario.
 
 ### Week 9: reviews, coupons, offers
-- **Models:** `Review`, `ReviewVote`, `Coupon`, `CouponRedemption`, `Offer`.
+- **Models:** `Review`, `ReviewVote`, `ReviewReport`, `Coupon`, `CouponRedemption` (with the partial unique index), `Offer`.
 - **Build:** reviews (one per user, atomic aggregates, verified-viewer badge, report, admin moderation, nightly recompute); coupons (rules, atomic claim, reserve then commit then release inside the state machine, admin CRUD and stats); `GET /api/offers`.
 - **Tests:** two simultaneous reviews update totals correctly; coupon race gives exactly N redemptions; expired and cancelled orders release their coupon use.
 - **Exit:** all passing, documented in `docs/api.md`.
 
 ### Week 10: live seats, Bloom filters, write-behind
-- **Models:** none.
+- **Models:** `ProcessedBatch` (write-behind idempotency marker, TTL).
 - **Build:** SSE endpoint with Redis pub/sub across replicas, batching and heartbeats (test with `curl -N` in two terminals); Bloom filter on Redis bitmaps with nightly rebuild and the add-before-commit rule; write-behind view counters with the `RENAME` handoff and idempotent flush.
 - **Exit:** `bloomAttack.js` shows database queries avoided; the write-behind flood shows the write reduction; the flusher crash test shows no loss and no double count.
 
 ### Week 11: recommendations and AI
-- **Models:** `UserMovieSignal`.
+- **Models:** `UserMovieSignal` (TTL), `MovieEmbedding`.
 - **Build:** trending, genre similarity, signals, taste profile, evaluation script against the popularity baseline; embedding worker, similarity, natural-language search with zod validation, fallback, cache, rate limit and daily budget, cost logging.
 - **Exit:** hit-rate numbers recorded; AI search degrades cleanly when the model is slow or returns invalid output.
 
@@ -993,6 +1365,7 @@ Week 8   email verification + Google OAuth       ⏳    Week 17  buffer + finish
 14. A write-behind candidate states in one line why losing a few seconds of it is acceptable.
 15. The module has a `.http` example file and its endpoints are documented in `docs/api.md` (request body, response, error codes, auth and rate limit).
 16. The model has its own test (required fields, enums, and every unique index rejects a duplicate).
+17. Every index is justified by a query in section 9.6, and `explain('executionStats')` on the module's main queries shows `IXSCAN` with `totalDocsExamined` close to `nReturned`.
 
 **Frontend step:** works against the real API; loading, empty and error states; messages from `message`; works on a phone; one component or hook test where logic exists.
 

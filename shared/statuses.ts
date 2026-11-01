@@ -6,6 +6,14 @@ export const userRole = {
 
 export type UserRole = (typeof userRole)[keyof typeof userRole];
 
+export const userStatus = {
+    active: 'ACTIVE',
+    suspended: 'SUSPENDED',
+    deleted: 'DELETED'
+} as const;
+
+export type UserStatus = (typeof userStatus)[keyof typeof userStatus];
+
 export const seatStatus = {
     available: 'AVAILABLE',
     held: 'HELD',
