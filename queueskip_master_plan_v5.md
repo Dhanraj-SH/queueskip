@@ -1,8 +1,8 @@
-# QUEUESKIP: COMPLETE MASTER PLAN v3
+# QUEUESKIP: COMPLETE MASTER PLAN v5 (TypeScript, backend first, then frontend)
 
 A full stack movie discovery and ticket booking platform. Users sign up (email with verification, or Google), explore movies with cast, reviews and recommendations, pick a showtime and seats, apply a coupon, pay, and get a QR ticket. Hot releases are protected by a fair waiting room, hence the name.
 
-**This file replaces `queueskip_master_plan_v2.md`, `queueskip_architecture_addendum_v2_1.md` and `queueskip_style_guide_v2_2.md`.** Everything is merged here, adapted to your stack (TypeScript, Express, Mongoose, React) and your coding style. The old files remain useful only for their longer code templates.
+**This file replaces v4 and every earlier plan file.** What changed in v5: the language is now **TypeScript (strict)** across the backend, the `shared` package and the frontend. The design, the weekly order (backend first, then frontend) and the models-first routine are unchanged. Sections 3, 4, 6, 7, 9, 11, 14, 17, 18 and 19 changed.
 
 Tags: **[DECIDED]** settled so you do not have to think about it, **[PLANNED]** not built yet. Reasons are in *italics*. Targets are goals to measure against, not results.
 
@@ -11,8 +11,8 @@ Tags: **[DECIDED]** settled so you do not have to think about it, **[PLANNED]** 
 ## 0. START HERE
 
 1. Read sections 1 to 5 once (30 minutes). Do not read the rest yet.
-2. Do the **Week 0 checklist** (section 17). It takes 2 to 3 days.
-3. Then follow the **week-by-week plan** (section 17). Each week has tasks and an exit test. Do not start the next week until the exit test passes.
+2. Do **Week 0** (section 17): nine guided setup steps. It takes 2 to 3 days.
+3. Then follow the **week-by-week plan** (section 17). **Backend first (Weeks 1 to 12), frontend after (Weeks 13 to 16).** Each week has tasks and an exit test. Do not start the next week until the exit test passes.
 4. Keep this file open as the reference. Look up a section only when its week arrives.
 5. After every week: update the status block (section 18), commit, and write one interview story in `docs/stories.md`.
 
@@ -38,31 +38,34 @@ Tags: **[DECIDED]** settled so you do not have to think about it, **[PLANNED]** 
 
 ## 2. SCOPE TIERS AND THE CUT ORDER
 
-| Tier | Contents | Weeks |
+| Phase | Contents | Weeks |
 |---|---|---|
-| **Tier 1: Booking core** | auth, catalog, shows and seats, holds, orders, payments, tickets, rate limiting, load balancing, load tests, first AWS deploy | 1 to 8 |
-| **Tier 2: Product depth** | email verification, Google OAuth, reviews, coupons, real-time seats, Bloom filters | 9 to 12 |
-| **Tier 3: Smart features** | write-behind counters, recommendations, AI search, waiting room, polish | 13 to 16 |
+| **Backend, booking core** | setup, auth, catalog, shows and seats, holds, orders, payments, tickets, rate limiting, load balancing, load tests | 0 to 7 |
+| **Backend, product depth** | email verification, Google OAuth, password reset, reviews, coupons, offers, live seat stream, Bloom filters, write-behind | 8 to 10 |
+| **Backend, smart features and release** | recommendations, AI search, waiting room, drills, API freeze, AWS deploy | 11 to 12 |
+| **Frontend** | every page, built against the frozen API, then deployed | 13 to 16 |
+| **Buffer** | final load tests, README, demo video, resume | 17 |
 
-Each tier ends with something demoable and deployed. **If you run out of time, cut in this order:** waiting room, AI natural-language search, personal recommendations, write-behind signal stream, manager UI (seed shows by script). **Never cut** holds, orders, payments, tickets, rate limiting, and the load-balanced seat-race test.
+The backend alone is a complete, demoable project (with `.http` files, scripts and load tests). **If you run out of time, cut in this order:** waiting room, AI natural-language search, personal recommendations, write-behind signal stream, then in the frontend the admin, manager and scanner pages (seed shows by script). **Never cut** holds, orders, payments, tickets, rate limiting, the load-balanced seat-race test, or the core booking pages (browse, seat map, checkout, tickets).
 
 ## 3. TECH STACK [DECIDED]
 
 | Layer | Choice | Why |
 |---|---|---|
-| Language | TypeScript with ES modules (`import` and `export`), strict compiler settings, current Node LTS | Type safety across the backend, frontend and shared contracts |
-| API | Express | matches your code |
-| Database | MongoDB with Mongoose, run as a **replica set** | matches your repo and Weebspace. A replica set is required for transactions |
-| Cache and critical state | Redis with `ioredis` | holds, queue, rate limits, counters, cache |
+| Language | **TypeScript (strict)** with ES modules, current Node LTS | the compiler catches contract mismatches, wrong ids and missing null checks before a test does. Costs about one extra day in Week 0 |
+| Dev, check, build | `tsx watch` to run in development, `tsc --noEmit` to type-check, `tsup` for the production build | no build step while developing, and a single bundled output for Docker |
+| API | Express with `@types/express` | familiar, well typed |
+| Database | MongoDB with Mongoose 8 (built-in types, `InferSchemaType`), run as a **replica set** | a replica set is required for transactions |
+| Cache and critical state | Redis with `ioredis` (built-in types) | holds, queue, rate limits, counters, cache |
 | Background jobs | BullMQ (on Redis) | one less service than SQS, retries and delayed jobs built in. SQS is an optional swap behind `queueClient.ts` at deploy time |
-| Frontend | React with Vite, React Router, `fetch`, `react-hot-toast` | matches your pages. Create React App is deprecated, so use Vite. No extra data library: stay with `fetch`, `useState`, `useCallback` like your code |
+| Frontend | React with Vite in **TypeScript (`.tsx`)**, React Router, `fetch`, `react-hot-toast` | no extra data library: stay with `fetch`, `useState`, `useCallback` |
+| Contracts | **`zod` schemas in `shared`**, types inferred with `z.infer` | the backend validates with the schema, the frontend imports the type. A renamed field is a compile error |
 | Auth | JWT access token (in memory) plus httpOnly refresh cookie, `argon2` for passwords, `google-auth-library` for Google | |
-| Validation | manual early-return guards for small bodies, `zod` for big ones (orders, coupons, reviews) | |
 | Email | `nodemailer`, Mailpit locally, SES on AWS | |
 | Payments | Razorpay test mode, a tunnel (ngrok or cloudflared) for webhooks in development | webhooks need a public URL |
 | QR | `qrcode` | |
-| Tests | Vitest and `supertest` (`*.spec.ts`), k6 for load tests | Vitest handles TypeScript ES modules and uses the same `describe/it/expect` as Jest |
-| Quality | Strict TypeScript checks, ESLint with `typescript-eslint`, Prettier (single quotes, semicolons, 2 spaces) | |
+| Tests | Vitest (runs TypeScript natively) and `supertest` (`*.spec.ts`); k6 for load tests (k6 scripts stay JavaScript) | |
+| Quality | ESLint with `typescript-eslint`, Prettier (single quotes, semicolons, 2 spaces), `tsc --noEmit` in CI | |
 | Containers | Docker and Docker Compose, nginx locally as a load balancer | |
 | Cloud | AWS: ECS Fargate, ALB, ElastiCache Redis, S3, CloudFront, SES, CloudWatch, Secrets Manager. MongoDB Atlas for the database | Atlas is simpler and more compatible than DocumentDB |
 | CI/CD | GitHub Actions | |
@@ -84,6 +87,9 @@ Each tier ends with something demoable and deployed. **If you run out of time, c
 | Coupon stacking | one coupon per order, no stacking |
 | Seat status storage | only `AVAILABLE` and `SOLD` in MongoDB; `HELD` exists only in Redis with a TTL |
 | Seat-map stream | public Server-Sent Events (seat status is not sensitive) |
+| TypeScript strictness | `strict: true` plus `noUncheckedIndexedAccess`; no `any` (use `unknown` and narrow); no `enum` (use `as const` objects) |
+| Module resolution | `"module": "ESNext"`, `"moduleResolution": "Bundler"`, so imports have no file extensions (`import { env } from '../config/env'`) |
+| Where types live | request and response types come from `shared/contracts/` (zod schemas and `z.infer`); database record types come from Mongoose (`InferSchemaType`) |
 | Package count | not a monorepo-heavy setup: one root `package.json` with npm workspaces (`backend`, `frontend`, `shared`) |
 
 ## 5. ARCHITECTURE
@@ -143,6 +149,7 @@ queueSkip/
 │   │   ├── workers/       ticketWorker.ts, emailWorker.ts, outboxPublisher.ts, holdSweeper.ts,
 │   │   │                  writeBehindFlusher.ts, bloomRebuildJob.ts, reconciliationJob.ts, embeddingWorker.ts
 │   │   ├── lua/           holdSeats.lua, releaseSeats.lua, tokenBucket.lua
+│   │   ├── types/         express.d.ts (adds userId, userRole, requestId to Request)
 │   │   ├── config/        env.ts, db.ts, redis.ts
 │   │   ├── constants/     redisKeys.ts, limits.ts, statuses.ts
 │   │   ├── utils/         hash.ts, pagination.ts, clock.ts
@@ -151,6 +158,8 @@ queueSkip/
 │   │   └── workerMain.ts  starts the worker process
 │   ├── test/              app.spec.ts, authController.spec.ts, holdController.spec.ts,
 │   │                      concurrency/ (seatRace.spec.ts, couponRace.spec.ts, webhookReplay.spec.ts), helpers/
+│   ├── http/              auth.http, movies.http, holds.http, orders.http ... (request examples, one file per module)
+│   ├── scripts/           seed.ts, simulateUsers.ts, signWebhook.ts (helpers you run by hand)
 │   ├── .env.example
 │   └── package.json
 ├── frontend/
@@ -165,62 +174,138 @@ queueSkip/
 │   │   ├── utils/         index.ts (exports baseURL), formatMoney.ts
 │   │   └── App.tsx
 │   └── package.json
-├── shared/                contracts/ (shared TypeScript types), statuses.ts, errorCodes.ts
+├── shared/                contracts/ (zod schemas and inferred types), limits.ts, statuses.ts, errorCodes.ts
 ├── infra/                 CDK or Terraform
 ├── loadTests/             seatRace.js, couponRace.js, rateLimitBurst.js, bloomAttack.js, writeBehindFlood.js,
 │                          failover.js, sseFanout.js, waitingRoom.js
-├── docs/                  designDocs/, decisions/, runbooks/, stories.md
+├── docs/                  api.md (every endpoint: request, response, errors), designDocs/, decisions/, runbooks/, stories.md
 ├── docker-compose.yml     mongo (replica set), redisCritical, redisCache, mailpit, nginx + 3 api replicas
+├── tsconfig.base.json     strict TypeScript settings shared by every package
 └── package.json           workspaces: backend, frontend, shared
 ```
 
-## 7. STYLE AND NAMING RULES [DECIDED]
+## 7. STYLE, NAMING AND TYPESCRIPT RULES [DECIDED]
 
-1. **Files:** `<thing>Controller.ts`, `<thing>Routes.ts`, `<thing>Service.ts`, `<thing>Accessor.ts`, `<thing>Client.ts`. Middleware is plain camelCase (`auth.ts`). **Mongoose models are PascalCase singular** (`Watchlist.ts`, collection becomes `watchlists`). React pages and components use `.tsx`; hooks and other frontend files use `.ts`.
-2. **Handlers:** verb plus noun, camelCase: `holdSeats`, `releaseHold`, `createOrder`, `applyCoupon`, `scanTicket`, `checkWatchlistStatus`. Controllers are named exports with explicit request/response types.
-3. **Variables, functions, constants:** camelCase (`maxSeatsPerHold`). **Wire values** (statuses, roles, error codes) are UPPER_SNAKE strings exposed through a camelCase object: `orderStatus.pendingPayment === 'PENDING_PAYMENT'`.
-4. **Environment variables** are UPPER_SNAKE in `.env` and read once in `config/env.ts` as camelCase (`env.mongoUri`).
-5. **Request context** from `auth.ts`: `req.userId`, `req.userRole`, `req.isEmailVerified`, declared in Express request types.
-6. **Controller pattern:** one `try/catch`; guards that each return early with one message; then the service call; then the response. Log as `console.error('Hold seats error:', error)`; answer `500` with `'Server error'`; never return `error.message` to the client.
+1. **Files:** `<thing>Controller.ts`, `<thing>Routes.ts`, `<thing>Service.ts`, `<thing>Accessor.ts`, `<thing>Client.ts` (all `.ts` after conversion). Middleware is plain camelCase (`auth.ts`). **Mongoose models are PascalCase singular** (`Watchlist.ts`, collection becomes `watchlists`). React pages and components are PascalCase `.tsx`; hooks start with `use` and are `.ts`; other frontend files are camelCase `.ts`.
+2. **Handlers:** verb plus noun, camelCase: `holdSeats`, `releaseHold`, `createOrder`, `applyCoupon`, `scanTicket`, `checkWatchlistStatus`. Controllers are typed named exports: `export const holdSeats = async (req: Request, res: Response) => { ... };`
+3. **Variables, functions, constants:** camelCase (`maxSeatsPerHold`). **Types, interfaces and classes:** PascalCase with no `I` prefix (`HoldSeatsRequest`, `OrderRecord`). **Wire values** (statuses, roles, error codes) are UPPER_SNAKE strings exposed through a camelCase `as const` object: `orderStatus.pendingPayment === 'PENDING_PAYMENT'`, with a derived type `OrderStatus`.
+4. **Environment variables** are UPPER_SNAKE in `.env`, validated once in `config/env.ts` with zod, and exposed as a typed camelCase object (`env.mongoUri`).
+5. **Request context** from `auth.ts`: `req.userId`, `req.userRole`, `req.isEmailVerified`, `req.requestId`, declared once in `src/types/express.d.ts` (template below). They are optional on the type, so a controller that needs a user begins with a guard.
+6. **Controller pattern:** one `try/catch`; guards that each return early with one message; then the service call; then the response. In `catch (error)` the error is `unknown`: log it as `console.error('Hold seats error:', error)`, answer `500` with `'Server error'`, and never return `error.message` to the client.
 7. **Messages:** plain sentences, capitalised, no trailing full stop: `'Movie ID is required'`, `'Invalid movie ID format'`.
-8. **Contract names are defined once** (`shared/contracts/`). One name per concept everywhere. *Your own watchlist code showed the bug this prevents: the backend sent `isInWatchlist` while the page read `inWatchlist`.*
-9. **Formatting:** single quotes, semicolons, 2 spaces (`.prettierrc`: `{ "singleQuote": true, "semi": true, "tabWidth": 2 }`).
-10. **URLs** are lowercase kebab-case; query params camelCase (`?pageSize=20`).
-11. **Redis keys:** camelCase words joined by `:`, hash tag around the show id (`hold:{showId}:{seatId}`), all defined in `constants/redisKeys.ts`.
+8. **Contracts are defined once, in `shared/contracts/`,** as zod schemas with inferred types. The backend parses requests with the schema; the frontend imports the same request and response types. *Your earlier watchlist bug (backend sent `isInWatchlist`, the page read `inWatchlist`) becomes a compile error.*
+9. **TypeScript rules:** `strict` and `noUncheckedIndexedAccess` on; no `any` (use `unknown` and narrow it); no `enum` (use `as const` objects); `import type` for type-only imports; explicit return types on exported service and accessor functions; no non-null assertion (`!`) without a comment saying why; no `// @ts-ignore` (use `@ts-expect-error` with a reason, rarely).
+10. **Formatting:** single quotes, semicolons, 2 spaces (`.prettierrc`: `{ "singleQuote": true, "semi": true, "tabWidth": 2 }`).
+11. **URLs** are lowercase kebab-case; query params camelCase (`?pageSize=20`).
+12. **Redis keys:** camelCase words joined by `:`, hash tag around the show id (`hold:{showId}:{seatId}`), all defined in `constants/redisKeys.ts`.
+
+**Shared contract template (`shared/contracts/hold.ts`):**
+
+```ts
+import { z } from 'zod';
+import { maxSeatsPerHold } from '../limits';
+
+export const objectIdSchema = z.string().regex(/^[a-f\d]{24}$/i, 'Invalid ID format');
+
+export const holdSeatsRequestSchema = z.object({
+  showId: objectIdSchema,
+  seatIds: z.array(objectIdSchema).min(1, 'Seat IDs are required').max(maxSeatsPerHold),
+});
+
+export type HoldSeatsRequest = z.infer<typeof holdSeatsRequestSchema>;
+export type HoldSeatsResponse = { holdId: string; expiresAt: string };
+export type WatchlistStatusResponse = { inWatchlist: boolean };
+```
+
+**Request context template (`backend/src/types/express.d.ts`):**
+
+```ts
+import type { UserRole } from '@queueskip/shared/statuses';
+
+declare global {
+  namespace Express {
+    interface Request {
+      userId?: string;
+      userRole?: UserRole;
+      isEmailVerified?: boolean;
+      requestId?: string;
+    }
+  }
+}
+
+export {};
+```
 
 **Controller template (copy for every new handler):**
 
 ```ts
 import type { Request, Response } from 'express';
+import { holdSeatsRequestSchema } from '@queueskip/shared/contracts/hold';
+import type { HoldSeatsResponse } from '@queueskip/shared/contracts/hold';
+import { errorCode } from '@queueskip/shared/errorCodes';
+import { holdSeatsForUser } from '../services/holdService';
 
-type AuthenticatedRequest = Request & { userId: string };
-
-export const holdSeats = async (req: AuthenticatedRequest, res: Response) => {
+export const holdSeats = async (req: Request, res: Response) => {
   try {
     const userId = req.userId;
-    const { showId, seatIds } = req.body;
 
-    if (!showId || !Array.isArray(seatIds) || seatIds.length === 0) {
-      return res.status(400).json({ message: 'Show ID and seat IDs are required' });
+    if (!userId) {
+      return res.status(401).json({ message: 'Not authenticated' });
     }
 
-    if (!mongoose.Types.ObjectId.isValid(showId)) {
-      return res.status(400).json({ message: 'Invalid show ID format' });
+    const parsed = holdSeatsRequestSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      return res.status(400).json({ message: parsed.error.issues[0]?.message ?? 'Invalid request' });
     }
 
+    const { showId, seatIds } = parsed.data;
     const result = await holdSeatsForUser({ userId, showId, seatIds });
 
     if (!result.held) {
-      return res.status(409).json({ code: 'SEAT_UNAVAILABLE', message: 'One or more seats are no longer available' });
+      return res.status(409).json({
+        code: errorCode.seatUnavailable,
+        message: 'One or more seats are no longer available',
+      });
     }
 
-    res.status(201).json({ holdId: result.holdId, expiresAt: result.expiresAt });
+    const body: HoldSeatsResponse = { holdId: result.holdId, expiresAt: result.expiresAt };
+    res.status(201).json(body);
   } catch (error) {
     console.error('Hold seats error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 };
 ```
+
+**Model template (`models/ShowSeat.ts`):**
+
+```ts
+import mongoose, { Schema } from 'mongoose';
+import type { InferSchemaType } from 'mongoose';
+
+const showSeatSchema = new Schema(
+  {
+    showId: { type: Schema.Types.ObjectId, ref: 'Show', required: true },
+    section: { type: String, required: true },
+    row: { type: String, required: true },
+    number: { type: Number, required: true },
+    tier: { type: String, required: true },
+    priceMinor: { type: Number, required: true },
+    status: { type: String, enum: ['AVAILABLE', 'SOLD'], default: 'AVAILABLE' },
+    orderId: { type: Schema.Types.ObjectId, ref: 'Order', default: null },
+  },
+  { timestamps: true }
+);
+
+showSeatSchema.index({ showId: 1, section: 1, row: 1, number: 1 }, { unique: true });
+showSeatSchema.index({ showId: 1, status: 1 });
+
+export type ShowSeatRecord = InferSchemaType<typeof showSeatSchema>;
+export default mongoose.model('ShowSeat', showSeatSchema);
+```
+
+**`tsconfig.base.json` essentials:** `"target": "ES2022"`, `"module": "ESNext"`, `"moduleResolution": "Bundler"`, `"strict": true`, `"noUncheckedIndexedAccess": true`, `"noImplicitOverride": true`, `"esModuleInterop": true`, `"skipLibCheck": true`, `"forceConsistentCasingInFileNames": true`, `"noEmit": true` (building is done by `tsup`, checking by `tsc`). Each package extends it.
 
 ## 8. GLOBAL CONVENTIONS
 
@@ -236,6 +321,8 @@ export const holdSeats = async (req: AuthenticatedRequest, res: Response) => {
 - **Wrong ids:** every `:id` path parameter is checked with `mongoose.Types.ObjectId.isValid` before any query.
 
 ## 9. DATA MODEL (Mongoose collections)
+
+Each model is a TypeScript file that exports its schema-inferred record type (`InferSchemaType`), as in the template in section 7. Services and accessors use those types, never plain `any` documents.
 
 Indexes are listed as `unique` or `index`. Embed what is read together; keep separate what grows or is queried alone.
 
@@ -504,7 +591,9 @@ A manager UI for shows is optional: seed shows by script if time is short.
 
 ## 11. FRONTEND PLAN
 
-**Rules:** access token only in `AuthContext` memory, never `localStorage`. Requests use `credentials: 'include'`. On 401 call refresh once, retry, otherwise go to `/login`; never loop. Show `EMAIL_NOT_VERIFIED` with a "resend email" action. Send an `Idempotency-Key` (one UUID per checkout attempt) on order and pay calls. Countdown uses the server's `expiresAt`. Seat selection is optimistic and rolls back on 409. Accessible seat map (keyboard, text labels, not colour alone). Skeletons, empty states and error states everywhere.
+**Built in Weeks 13 to 16, after the API is frozen (end of Week 12).** The frontend is thin by design: every rule already lives in the API, and `docs/api.md` plus the `.http` files are your reference. Week-by-week mapping is in section 17.
+
+**Stack:** React, Vite and TypeScript (`.tsx`); request and response types and constants are imported from `shared`, so a field renamed in the API fails the frontend type check. **Rules:** access token only in `AuthContext` memory, never `localStorage`. Requests use `credentials: 'include'`. On 401 call refresh once, retry, otherwise go to `/login`; never loop. Show `EMAIL_NOT_VERIFIED` with a "resend email" action. Send an `Idempotency-Key` (one UUID per checkout attempt) on order and pay calls. Countdown uses the server's `expiresAt`. Seat selection is optimistic and rolls back on 409. Accessible seat map (keyboard, text labels, not colour alone). Skeletons, empty states and error states everywhere.
 
 | Step | Pages and components |
 |---|---|
@@ -717,8 +806,9 @@ Cache-aside for movie list, detail, similar, trending and AI results with the TT
 - **Integration:** real MongoDB replica set and Redis from Docker Compose, through `supertest`. Every write endpoint has a test that **reads the database afterwards**.
 - **Concurrency** (`backend/test/concurrency/`): seat race, coupon race, webhook replay, double-click pay, scan race.
 - **Contract:** frontend and backend read field names from `shared/contracts/`.
+- **Without a UI (Weeks 1 to 12):** use `.http` files (VS Code REST Client or Thunder Client), supertest, and scripts in `backend/scripts/` (`seed.ts`, `simulateUsers.ts`, `signWebhook.ts`). Read emails in Mailpit. Every endpoint gets a `.http` example and an entry in `docs/api.md` before its module counts as done.
 - **Load** (`loadTests/`, k6): see section 15.
-- CI runs ESLint, Prettier check and the test suite on every pull request using Docker Compose.
+- CI runs `tsc --noEmit`, ESLint, the Prettier check and the test suite on every pull request using Docker Compose. Test files are `*.spec.ts`.
 
 ## 15. LOAD TESTS (record your real numbers)
 
@@ -751,115 +841,137 @@ GitHub Actions: lint, test, build image, deploy
 ```
 Set an AWS Budget alert before creating anything, and tear down costly resources when you are not demoing. SES starts in sandbox mode, so plan for the access request. Infrastructure as code (CDK or Terraform) is a strong bonus. API and worker are separate services so they scale independently.
 
-## 17. WEEK-BY-WEEK SCHEDULE (16 weeks, alongside DSA)
+## 17. WEEK-BY-WEEK SCHEDULE (backend first, then frontend)
 
-**Daily rhythm:** 1 to 2 LeetCode problems in Java every day, one mock interview or system design question per weekend, one STAR story added to `docs/stories.md` each week. Work one slice at a time; commit small (`feat(holds): add holdSeats Lua script`); one pull request per slice, even if you review it yourself.
+**Order:** build the whole API first (Weeks 1 to 12), freeze it, then build the frontend (Weeks 13 to 16), then a buffer week (17). About 18 weeks, alongside DSA.
 
-### Week 0: setup (2 to 3 days, before anything else)
-- Install Node LTS, Docker, Git, VS Code, k6, `mongosh`. Create accounts: GitHub, Google Cloud (OAuth), Razorpay (test), AWS (set the budget alert), MongoDB Atlas.
-- Create the repo with the structure in section 6 (empty folders get a `.gitkeep`). npm workspaces, strict TypeScript, ESLint, Prettier, `.env.example`, `.gitignore`.
-- `docker-compose.yml`: MongoDB as a single-node replica set, two Redis containers, Mailpit. Confirm you can connect from `mongosh` and run a transaction.
-- Write a one-page design doc: the problem, the three core problems (holds, orders, waiting room), the stack. Put it in `docs/designDocs/overview.md`.
-- GitHub Actions workflow runs lint, strict TypeScript checks, tests and the frontend build.
-- **Exit:** `docker compose up` starts the data stores, `npm test` and `npm run typecheck` pass, CI is green.
+**Routine for every backend module (models first):**
+1. Write the Mongoose **model** and its indexes (`models/<Name>.ts`).
+2. **Model test:** required fields, enums, and each unique index rejects a duplicate.
+3. **Seed data** and a factory in `test/helpers/factories.ts`.
+4. **Service** (the rules).
+5. **Controller** (the template from section 7).
+6. **Routes**, with the rate limiter attached once Week 7 lands.
+7. **Tests:** happy path, failure path, ownership, and a read of the database afterwards.
+8. A **`.http` example** and an entry in **`docs/api.md`**.
+9. Commit, tick the status block, add one STAR story.
 
-### Week 1: foundation and auth
-- Express app: `app.ts`, `server.ts`, `config/env.ts` (validated), MongoDB and Redis connections, `requestId`, `errorHandler`, `/healthz` and `/readyz`.
-- `User` model; register, login, refresh, logout, me; `auth.ts` middleware (`req.userId`, `req.userRole`); `tokenVersion`.
-- Vite frontend: `AuthContext`, `Navbar`, `LoginPage`, `RegisterPage`, session restore through refresh.
-- **Exit:** register, log in, refresh the page and stay signed in, log out everywhere, all through the UI; auth tests read the database afterward.
+*Why one module at a time rather than all models upfront: indexes depend on how queries use them, so models written early often need rework. If you prefer writing the core models first, that works; expect to adjust some indexes later.*
+
+**Daily rhythm:** 1 to 2 LeetCode problems in Java every day, one mock interview or system design question per weekend, one story per week in `docs/stories.md`. Commit small (`feat(holds): add holdSeats Lua script`); one pull request per module.
+
+**Testing without a UI:** `.http` files, supertest, `backend/scripts/` helpers, Mailpit for emails, a script that sends a correctly signed test webhook for payments, and a placeholder redirect for the Google callback until the frontend exists.
+
+### Week 0: setup (guided, 9 steps)
+1. Check tools (Node 20+, npm, Git, Docker). 2. Create the folder and Git repo. 3. Workspace `package.json` and `tsconfig.base.json`. 4. TypeScript tooling: `typescript`, `tsx`, `tsup`, ESLint with `typescript-eslint`, Prettier. 5. The `shared` package (statuses, error codes, limits, `objectIdSchema`). 6. The backend package (`tsconfig.json`, scripts, dependencies). 7. First backend files: `config/env.ts`, `db.ts`, `redis.ts`, `requestId`, `errorHandler`, `types/express.d.ts`, `app.ts` with `/healthz` and `/readyz`, `server.ts`. 8. Start MongoDB (replica set), two Redis instances and Mailpit with Docker Compose. 9. First test and the CI workflow (`tsc --noEmit`, lint, tests).
+- Also create accounts: GitHub, Google Cloud (OAuth), Razorpay (test), AWS (set the budget alert first), MongoDB Atlas.
+- **Exit:** `docker compose up` works, `npm run typecheck` and `npm test` pass, `/readyz` shows everything true, CI is green.
+
+### Week 1: User model and auth
+- **Model:** `User`. Test it (unique email, role enum).
+- **Build:** register, login, refresh, logout, me; `auth.ts` middleware (`req.userId`, `req.userRole`); `tokenVersion`; first admin from `ADMIN_EMAIL`; argon2 hashing; httpOnly refresh cookie.
+- **Exit:** the whole flow works from `auth.http`; tests read the database after every write; logout bumps `tokenVersion` and old tokens stop working.
 
 ### Week 2: catalog, search, watchlist
-- Models `Movie`, `Person`, `Watchlist`; seed script with about 50 fictional movies, cast and genres.
-- List with filters and pagination, detail, cast, genres, `$text` search; Redis cache-aside for list and detail; watchlist endpoints with `{ inWatchlist }` status.
-- Frontend: `HomePage`, `MovieDetailPage` (`MovieHeader`, `MovieSections`, cast), `SearchPage`, watchlist button.
-- **Exit:** browse, search, open a movie, add and remove from the watchlist; cache hit ratio visible in logs.
+- **Models:** `Movie` (embedded genres, cast, crew), `Person`, `Watchlist`.
+- **Build:** `seed.ts` with about 50 fictional movies, list with filters and pagination, detail, cast, genres, `$text` search, admin create and edit and cast replace, watchlist REST with `{ inWatchlist }`, Redis cache-aside for list and detail.
+- **Exit:** search works, a cached detail request is visibly faster, duplicate watchlist add is handled, removing a missing item returns 404.
 
 ### Week 3: theatres, shows, seat map
-- Models `Theatre`, `Screen`, `Show`, `ShowSeat`; manager role; show creation generates seats; overlap check; `GET /movies/:id/shows`, `GET /shows/:id/seats` merged with Redis holds.
-- Frontend: `ShowtimesPage` and a read-only `SeatMap`.
-- **Exit:** pick a movie, see showtimes by theatre, see a seat map with sold seats.
+- **Models:** `Theatre`, `Screen`, `Show`, `ShowSeat`.
+- **Build:** manager role, create theatre and screen, create show (generates one `ShowSeat` per seat), overlap check, `GET /movies/:id/shows`, `GET /shows/:id/seats` (Redis holds merged in later).
+- **Exit:** a show with the right number of seats exists; overlapping shows return 409; unique seat index rejects duplicates.
 
 ### Week 4: seat holds (core problem 1)
-- `constants/redisKeys.ts`, Lua scripts, `holdAccessor`, `holdService`, hold and release endpoints, per-user limits, `holdSweeper`.
-- Frontend: seat selection, hold call, `useHoldTimer` countdown, release on leave.
-- Concurrency test: 50 then 200 users on one seat, exactly one succeeds; half-held-group test; expired-hold-cannot-delete-others test.
-- **Exit:** the seat-race test passes; design doc `docs/designDocs/holdSystem.md` written.
+- **Models:** none (Redis). Write `constants/redisKeys.ts` usage, `lua/holdSeats.lua`, `lua/releaseSeats.lua`.
+- **Build:** `holdAccessor`, `holdService`, hold and release endpoints, per-user hold limits, `holdSweeper`, `simulateUsers.ts` (many fake users).
+- **Tests:** 50 then 200 users on one seat, exactly one wins; half-held group impossible; expired hold cannot delete another user's hold.
+- **Exit:** seat-race test passes; `docs/designDocs/holdSystem.md` written.
 
 ### Week 5: orders and the state machine (core problem 2)
-- `Order` model, `orderStateMachine`, `pricingService` (server-side), `idempotency` middleware, create order (extends the hold), sell seats in a transaction, expiry job, cancel.
-- Tests: double-click create order, two racing transitions, seat sold twice attempt, Redis killed mid-checkout.
-- **Exit:** a held seat becomes an order and then `SOLD`; duplicate requests produce one order; all verified by database reads.
+- **Models:** `Order` (with `history`), `IdempotencyKey` (TTL index).
+- **Build:** `pricingService` (server-side), `orderStateMachine`, `idempotency` middleware, create order (extends the hold once), sell seats in a transaction with `modifiedCount` checked, expiry job, cancel.
+- **Tests:** double-click create order gives one order; two racing transitions; seat-sold-twice attempt; Redis killed mid-checkout.
+- **Exit:** a held seat becomes an order then `SOLD`, verified by database reads.
 
-### Week 6: payments and tickets
-- Razorpay test mode: payment session, webhook with signature check and dedupe, late-payment handling, outbox and publisher, BullMQ queues, `ticketWorker` (QR), `emailWorker` (Mailpit), scan endpoint.
-- Frontend: `CheckoutPage` and `MyTicketsPage`.
-- **Exit:** the full booking flow works end to end in the browser, a replayed webhook changes nothing, a late payment gets confirmed or refunded.
+### Week 6: payments, tickets, workers
+- **Models:** `Payment`, `PaymentEvent` (unique event id), `Ticket`, `OutboxEvent`, `Refund`.
+- **Build:** Razorpay test-mode session, webhook with signature check and dedupe, late-payment handling, outbox and publisher, BullMQ queues, `ticketWorker` (QR), `emailWorker` (Mailpit), scan endpoint, `signWebhook.ts`.
+- **Exit:** the full booking flow works end to end from `.http` files and scripts; a replayed webhook changes nothing; a late payment is confirmed or refunded.
 
 ### Week 7: rate limiting, load balancing, first load tests
-- `rateLimiter.ts` and the token bucket; apply the policy table; limiter tests for every route.
-- nginx plus 3 API replicas in Compose; `X-Served-By`; failover test.
-- k6: seat race through the balancer, rate limit burst.
-- **Exit:** the 5,000-users-for-200-seats test sells exactly 200 through 3 replicas; killing a replica barely moves the error rate.
+- **Models:** none.
+- **Build:** `lua/tokenBucket.lua`, `rateLimiter.ts`, apply the policy table to every route with tests (limit + 1 requests gives 429); nginx plus 3 API replicas in Compose with `X-Served-By`; k6 seat race through the balancer; failover test.
+- **Optional but recommended:** a half-day deploy rehearsal to AWS (API, Atlas, one Redis) so infrastructure surprises appear now, not in Week 12.
+- **Exit:** 5,000 users for 200 seats through 3 replicas sells exactly 200; killing a replica barely moves the error rate.
 
-### Week 8: first AWS deploy (Tier 1 complete)
-- Dockerfiles, GitHub Actions deploy, ECS services for API and workers, ALB with `/readyz` health checks, Atlas, ElastiCache, S3 and CloudFront for the frontend, secrets, CloudWatch dashboards and alarms.
-- Smoke test the live site; run the seat race against it.
-- **Exit:** a public URL where you can book a ticket (test payment), with a README and architecture diagram. Tag `v1-tier1`.
+### Week 8: email verification, password reset, Google OAuth
+- **Models:** `EmailToken` (TTL), `OAuthAccount`.
+- **Build:** verification and reset flows with hashed single-use tokens, generic responses, resend limits, `requireVerifiedEmail` on holds, orders and reviews; Google flow with PKCE, `state`, `nonce`, ID token checks and the three linking rules including pre-hijacking. The callback redirects to `CLIENT_URL` until the frontend exists. Read tokens from Mailpit.
+- **Exit:** tests for verified and unverified access, enumeration-safe responses and the pre-hijacking scenario.
 
-### Week 9: email verification, password reset, Google OAuth
-- `EmailToken`, verification and reset flows, resend limits, `requireVerifiedEmail` on holds, orders and reviews, generic responses.
-- `OAuthAccount`, Google flow with PKCE, `state`, `nonce`, ID token checks, the three linking rules including pre-hijacking.
-- Frontend: check-your-email page, verify page, Continue with Google, resend action.
-- **Exit:** tests for verified/unverified access, enumeration-safe responses, and the pre-hijacking scenario.
+### Week 9: reviews, coupons, offers
+- **Models:** `Review`, `ReviewVote`, `Coupon`, `CouponRedemption`, `Offer`.
+- **Build:** reviews (one per user, atomic aggregates, verified-viewer badge, report, admin moderation, nightly recompute); coupons (rules, atomic claim, reserve then commit then release inside the state machine, admin CRUD and stats); `GET /api/offers`.
+- **Tests:** two simultaneous reviews update totals correctly; coupon race gives exactly N redemptions; expired and cancelled orders release their coupon use.
+- **Exit:** all passing, documented in `docs/api.md`.
 
-### Week 10: reviews and ratings
-- `Review`, `ReviewVote`; one review per user (unique index); atomic aggregates; verified-viewer badge; report and basic moderation; nightly recompute job.
-- Frontend: `ReviewList`, `RatingModal`, helpful vote.
-- **Exit:** two simultaneous reviews update the totals correctly; duplicate review returns 409.
+### Week 10: live seats, Bloom filters, write-behind
+- **Models:** none.
+- **Build:** SSE endpoint with Redis pub/sub across replicas, batching and heartbeats (test with `curl -N` in two terminals); Bloom filter on Redis bitmaps with nightly rebuild and the add-before-commit rule; write-behind view counters with the `RENAME` handoff and idempotent flush.
+- **Exit:** `bloomAttack.js` shows database queries avoided; the write-behind flood shows the write reduction; the flusher crash test shows no loss and no double count.
 
-### Week 11: coupons and offers
-- `Coupon`, `CouponRedemption`, `Offer`; apply and remove; validation rules; atomic claim; reserve, commit, release in the state machine; admin coupon CRUD and stats.
-- Frontend: `CouponInput`, `PriceBreakdown`, offers on the home page.
-- **Exit:** the coupon race test gives exactly N redemptions; expired and cancelled orders release their coupon use.
+### Week 11: recommendations and AI
+- **Models:** `UserMovieSignal`.
+- **Build:** trending, genre similarity, signals, taste profile, evaluation script against the popularity baseline; embedding worker, similarity, natural-language search with zod validation, fallback, cache, rate limit and daily budget, cost logging.
+- **Exit:** hit-rate numbers recorded; AI search degrades cleanly when the model is slow or returns invalid output.
 
-### Week 12: real-time seats and Bloom filters
-- SSE endpoint, Redis pub/sub fan-out across replicas, batching, heartbeats; `useSeatStream`.
-- Bloom filter on Redis bitmaps, nightly rebuild, add-before-commit rule, shield for movie ids and coupon codes.
-- **Exit:** two browsers see each other's holds live; `bloomAttack.js` shows the database queries avoided. Tag `v2-tier2`.
+### Week 12: waiting room, drills, API freeze, AWS deploy
+- **Models:** none.
+- **Build:** waiting room with admission tokens and drain rate; `reconciliationJob`; failure drills (Redis down, slow payment provider, worker crash, duplicate webhook, double-click pay) with runbooks; full review of `docs/api.md`; **freeze the API and tag `backend-v1`**; deploy the backend to AWS (ECS Fargate, ALB with `/readyz`, Atlas, ElastiCache, secrets, CloudWatch alarms, CI/CD); run the main load tests against it.
+- **If short on time:** drop the waiting room first, and move deploy polish to Week 17.
+- **Exit:** a public API URL, every endpoint documented, the headline load test passing on AWS.
+- **After the freeze:** during the frontend weeks only bug fixes and small additions are allowed, each logged in `docs/api.md` with the date.
 
-### Week 13: write-behind, trending, recommendations
-- Write-behind view counters with the `RENAME` handoff and idempotent flush; optional signal stream; trending; genre similarity; user signals and taste profile; evaluation script against the popularity baseline.
-- Frontend: `RecommendationRow` on the home page and movie detail.
-- **Exit:** the flood test shows the database write reduction; crash test shows no loss and no double count; hit-rate numbers recorded.
+### Week 13: frontend foundation, auth, home, movie detail
+- Vite + React + TypeScript setup, `shared` types and constants, `AuthContext` (token in memory, refresh on load), `Navbar`, router, `utils/index.ts`.
+- `LoginPage`, `RegisterPage`, check-your-email and `VerifyEmailPage`, Continue with Google.
+- `HomePage` (now showing, upcoming, offers, genre rows), `MovieDetailPage` (`MovieHeader`, `MovieSections`, cast, rating summary, watchlist button).
+- **Exit:** register, verify through Mailpit, log in, browse and open a movie, all in the browser.
 
-### Week 14: AI features
-- Embedding worker, similarity, natural-language search with zod validation, fallback, caching, rate limit and daily budget, cost logging; `AiSearchBox`.
-- **Exit:** the search works, degrades cleanly when the model is slow or invalid, and you have numbers for fallback rate and cost per 1,000 queries.
+### Week 14: reviews, search, showtimes, recommendations
+- `ReviewList`, `RatingModal`, helpful vote, report; `SearchPage` with filters and `AiSearchBox`; `ShowtimesPage`; `RecommendationRow` on home and detail pages.
+- **Exit:** write a review, search by text and by natural language, reach a showtime list.
 
-### Week 15: waiting room, abuse control, manager UI
-- Waiting room with admission tokens and drain rate; `reconciliationJob`; failure drills (Redis down, slow payment provider, worker crash, duplicate webhook, double-click pay); runbooks; minimal manager and scanner UI.
-- **Exit:** the 10,000-join waiting room test; every drill documented in `docs/runbooks/`.
+### Week 15: booking flow
+- `SeatSelectionPage` with `SeatMap`, `useSeatStream`, `useHoldTimer`, waiting room screen; `CheckoutPage` with `CouponInput`, `PriceBreakdown`, Razorpay test checkout, result and failure states; `MyTicketsPage` with QR.
+- Optimistic seat selection with rollback on 409; countdown from the server's `expiresAt`; `Idempotency-Key` on order and pay calls.
+- **Exit:** book a ticket end to end in the browser, with two browsers showing each other's held seats live.
 
-### Week 16: hardening, numbers, story
-- Run the whole load test list on AWS; tune ALB, autoscaling and cache TTLs; fix the top bottleneck; update dashboards.
-- README with architecture diagram, setup steps and results; 3-minute demo video; fill in the resume line and the stories file. Tag `v3-final`.
+### Week 16: remaining pages, polish, frontend deploy
+- `WatchlistPage`, profile, order history and cancel; `AdminPage` (coupons, review moderation); `ScannerPage`; loading, empty and error states everywhere; mobile layout; accessibility pass on the seat map.
+- Deploy the frontend (S3 and CloudFront) and point it at the live API.
+- **Exit:** the live site works on a phone; a stranger could book a ticket without help.
+
+### Week 17: buffer and finish
+- Re-run the whole load test list against AWS, fix the top bottleneck, tune ALB, autoscaling and cache TTLs.
+- README with architecture diagram, setup steps and results; 3-minute demo video; fill in the resume line and the stories file. Tag `v1-final`.
 - **Exit:** every number in section 20 is real.
 
-**If you fall behind:** apply the cut order in section 2, and keep the weeks you cut as "future work" in the README.
+**If you fall behind:** apply the cut order in section 2 and keep the cut items as "future work" in the README.
 
-## 18. STATUS BLOCK (update after every slice; mark done only when its Definition of Done is met)
+## 18. STATUS BLOCK (update after every module; tick only when its Definition of Done is met)
 
 ```
-Week 0  setup                          ✅     Week 9   email verification + Google    ⏳
-Week 1  foundation + auth              ⏳     Week 10  reviews + ratings              ⏳
-Week 2  catalog + search + watchlist   ⏳     Week 11  coupons + offers               ⏳
-Week 3  theatres + shows + seat map    ⏳     Week 12  real-time seats + Bloom        ⏳
-Week 4  seat holds                     ⏳     Week 13  write-behind + recommendations ⏳
-Week 5  orders + state machine         ⏳     Week 14  AI features                    ⏳
-Week 6  payments + tickets             ⏳     Week 15  waiting room + abuse control   ⏳
-Week 7  rate limit + load balancing    ⏳     Week 16  hardening + numbers + story    ⏳
-Week 8  first AWS deploy               ⏳
+Week 0   setup (9 steps)                         ⏳    Week 9   reviews + coupons + offers        ⏳
+Week 1   User model + auth                       ⏳    Week 10  live seats + Bloom + write-behind ⏳
+Week 2   catalog + search + watchlist            ⏳    Week 11  recommendations + AI              ⏳
+Week 3   theatres + shows + seat map             ⏳    Week 12  waiting room + freeze + AWS       ⏳
+Week 4   seat holds                              ⏳    Week 13  frontend: auth + home + detail    ⏳
+Week 5   orders + state machine                  ⏳    Week 14  frontend: reviews + search        ⏳
+Week 6   payments + tickets + workers            ⏳    Week 15  frontend: booking flow            ⏳
+Week 7   rate limiting + load balancing          ⏳    Week 16  frontend: rest + deploy           ⏳
+Week 8   email verification + Google OAuth       ⏳    Week 17  buffer + finish                   ⏳
 ```
 
 ## 19. DEFINITION OF DONE
@@ -870,22 +982,24 @@ Week 8  first AWS deploy               ⏳
 3. Ownership and role rules tested, including "user A cannot touch user B's data".
 4. At least one happy-path and one failure-path integration test, and **every write test reads the database afterwards**.
 5. The result of every write is checked (`modifiedCount`, `deletedCount`, `null` from `findOneAndUpdate`) and mapped to 404 or 409.
-6. Response field names come from `shared/contracts/`; the type returned matches the contract (a boolean is a boolean, not an array).
+6. Request and response types come from `shared/contracts/` (zod schema plus inferred type); the handler returns exactly that type (a boolean is a boolean, not an array).
 7. State changes go through the state machine and write `history`.
 8. Any read-modify-write is replaced by an atomic operation, named for the outcome it guards.
 9. Any new Redis key is in `constants/redisKeys.ts` with a TTL and a purpose.
 10. Any new public endpoint has a rate-limit policy with a stated fail-open or fail-closed choice, and a test.
 11. New environment variables are in `config/env.ts` and `.env.example`.
-12. Strict TypeScript checks, ESLint and Prettier pass in CI.
+12. `tsc --noEmit`, ESLint and Prettier pass in CI, with no `any` and no `@ts-ignore`.
 13. Concurrency-critical slices have a parallel test (200 requests) that passes through the load balancer with several replicas.
 14. A write-behind candidate states in one line why losing a few seconds of it is acceptable.
+15. The module has a `.http` example file and its endpoints are documented in `docs/api.md` (request body, response, error codes, auth and rate limit).
+16. The model has its own test (required fields, enums, and every unique index rejects a duplicate).
 
 **Frontend step:** works against the real API; loading, empty and error states; messages from `message`; works on a phone; one component or hook test where logic exists.
 
 ## 20. RESUME LINE AND INTERVIEW STORIES
 
 **Resume line (fill in real numbers)**
-> Built QueueSkip, a full stack movie ticketing platform (TypeScript, React, Node.js, Express, MongoDB, Redis, BullMQ) on AWS. Atomic Redis hold system with MongoDB transactions as the source of truth prevented double-booking with 5,000 concurrent buyers for 200 seats across 3 load-balanced replicas; idempotent checkout, deduplicated payment webhooks and a transactional outbox; atomic coupon redemption under races; distributed Lua token-bucket rate limiting; Bloom-filter shield cutting random-ID database queries by X%; write-behind counters cutting database writes by Y%; Google OIDC sign-in with email verification and pre-hijacking protection; hybrid genre and embedding recommendations with LLM search and a non-AI fallback; p95 hold latency <X> ms at <N> requests per second.
+> Built QueueSkip, a full stack movie ticketing platform (React, Node.js, Express, MongoDB, Redis, BullMQ) on AWS. Atomic Redis hold system with MongoDB transactions as the source of truth prevented double-booking with 5,000 concurrent buyers for 200 seats across 3 load-balanced replicas; idempotent checkout, deduplicated payment webhooks and a transactional outbox; atomic coupon redemption under races; distributed Lua token-bucket rate limiting; Bloom-filter shield cutting random-ID database queries by X%; write-behind counters cutting database writes by Y%; Google OIDC sign-in with email verification and pre-hijacking protection; hybrid genre and embedding recommendations with LLM search and a non-AI fallback; p95 hold latency <X> ms at <N> requests per second.
 
 **Stories to prepare (STAR)**, mapped to Amazon's Leadership Principles:
 - The double-booking bug you reproduced first and then fixed (Dive Deep, Ownership).
@@ -902,7 +1016,7 @@ Week 8  first AWS deploy               ⏳
 
 ## 21. RISKS AND SCOPE DECISIONS
 
-- **Scope creep is the main risk.** Follow the weekly order and the cut list. A deployed, load-tested Tier 1 beats an unfinished everything.
+- **Scope creep is the main risk.** Follow the weekly order and the cut list. A deployed, load-tested booking core beats an unfinished everything.
 - **No real payments, ever.** Test mode only; say so in the README.
 - **Content rights:** fictional or sample data, placeholder posters, no copyrighted images or trailers on any public demo.
 - **AI cost and safety:** budgets, caching, fallbacks and output validation are required, not optional.

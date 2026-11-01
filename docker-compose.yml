@@ -1,55 +1,55 @@
 name: queueskip
 
 services:
-  mongo:
-    image: mongo:8.0
-    command: ['mongod', '--replSet', 'rs0', '--bind_ip_all']
-    ports:
-      - '27017:27017'
-    volumes:
-      - mongo-data:/data/db
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          mongosh --quiet --eval "try { quit(rs.status().myState === 1 ? 0 : 1); }
-          catch (error) { const result = rs.initiate({_id: 'rs0', members: [{_id: 0,
-          host: 'localhost:27017'}]}); quit(result.ok === 1 ? 1 : 0); }"
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 10s
+    mongo:
+        image: mongo:8.0
+        command: ['mongod', '--replSet', 'rs0', '--bind_ip_all']
+        ports:
+            - '27017:27017'
+        volumes:
+            - mongo-data:/data/db
+        healthcheck:
+            test:
+                - CMD-SHELL
+                - >-
+                    mongosh --quiet --eval "try { quit(rs.status().myState === 1 ? 0 : 1); }
+                    catch (error) { const result = rs.initiate({_id: 'rs0', members: [{_id: 0,
+                    host: 'localhost:27017'}]}); quit(result.ok === 1 ? 1 : 0); }"
+            interval: 5s
+            timeout: 5s
+            retries: 20
+            start_period: 10s
 
-  redis-critical:
-    image: redis:7.4-alpine
-    command: ['redis-server', '--appendonly', 'yes']
-    ports:
-      - '6379:6379'
-    volumes:
-      - redis-critical-data:/data
-    healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
-      interval: 5s
-      timeout: 3s
-      retries: 10
+    redis-critical:
+        image: redis:7.4-alpine
+        command: ['redis-server', '--appendonly', 'yes']
+        ports:
+            - '6379:6379'
+        volumes:
+            - redis-critical-data:/data
+        healthcheck:
+            test: ['CMD', 'redis-cli', 'ping']
+            interval: 5s
+            timeout: 3s
+            retries: 10
 
-  redis-cache:
-    image: redis:7.4-alpine
-    command: ['redis-server', '--save', '', '--appendonly', 'no']
-    ports:
-      - '6380:6379'
-    healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
-      interval: 5s
-      timeout: 3s
-      retries: 10
+    redis-cache:
+        image: redis:7.4-alpine
+        command: ['redis-server', '--save', '', '--appendonly', 'no']
+        ports:
+            - '6380:6379'
+        healthcheck:
+            test: ['CMD', 'redis-cli', 'ping']
+            interval: 5s
+            timeout: 3s
+            retries: 10
 
-  mailpit:
-    image: axllent/mailpit:v1.27.10
-    ports:
-      - '1025:1025'
-      - '8025:8025'
+    mailpit:
+        image: axllent/mailpit:v1.27.10
+        ports:
+            - '1025:1025'
+            - '8025:8025'
 
 volumes:
-  mongo-data:
-  redis-critical-data:
+    mongo-data:
+    redis-critical-data:

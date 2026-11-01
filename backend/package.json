@@ -1,33 +1,33 @@
 {
-  "name": "backend",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "dev": "tsx watch src/server.ts",
-    "lint": "eslint src test --no-error-on-unmatched-pattern",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "dotenv": "^16.4.7",
-    "express": "^5.1.0",
-    "ioredis": "^5.11.1",
-    "mongoose": "^8.19.0",
-    "zod": "^4.6.7"
-  },
-  "devDependencies": {
-    "@eslint/js": "^10.0.1",
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
-    "@types/node": "^24.19.2",
-    "@types/supertest": "^7.2.1",
-    "cors": "^2.8.6",
-    "eslint": "^10.13.0",
-    "globals": "^17.13.0",
-    "helmet": "^8.3.0",
-    "supertest": "^7.1.4",
-    "tsx": "^4.23.15",
-    "vitest": "^4.1.12"
-  }
+    "name": "backend",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "tsx watch src/server.ts",
+        "lint": "eslint src test --no-error-on-unmatched-pattern",
+        "test": "vitest run",
+        "typecheck": "tsc --noEmit"
+    },
+    "dependencies": {
+        "dotenv": "^16.4.7",
+        "express": "^5.1.0",
+        "ioredis": "^5.11.1",
+        "mongoose": "^8.19.0",
+        "zod": "^4.6.7"
+    },
+    "devDependencies": {
+        "@eslint/js": "^10.0.1",
+        "@types/cors": "^2.8.19",
+        "@types/express": "^5.0.6",
+        "@types/node": "^24.19.2",
+        "@types/supertest": "^7.2.1",
+        "cors": "^2.8.6",
+        "eslint": "^10.13.0",
+        "globals": "^17.13.0",
+        "helmet": "^8.3.0",
+        "supertest": "^7.1.4",
+        "tsx": "^4.23.15",
+        "vitest": "^4.1.12"
+    }
 }
