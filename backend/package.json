@@ -10,6 +10,7 @@
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {
+        "@queueskip/shared": "*",
         "dotenv": "^16.4.7",
         "express": "^5.1.0",
         "ioredis": "^5.11.1",

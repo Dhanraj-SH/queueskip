@@ -1,7 +1,24 @@
-
 {
-  "name": "@queueskip/shared",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module"
+    "name": "@queueskip/shared",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "exports": {
+        "./contracts/hold": "./contracts/hold.ts",
+        "./errorCodes": "./errorCodes.ts",
+        "./limits": "./limits.ts",
+        "./statuses": "./statuses.ts"
+    },
+    "scripts": {
+        "lint": "eslint .",
+        "test": "vitest run",
+        "typecheck": "tsc --noEmit"
+    },
+    "dependencies": {
+        "zod": "^4.6.7"
+    },
+    "devDependencies": {
+        "@types/node": "^24.19.2",
+        "vitest": "^4.1.12"
+    }
 }

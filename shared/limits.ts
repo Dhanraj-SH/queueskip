@@ -1,0 +1,1 @@
+export const maxSeatsPerHold = 6;
