@@ -4,6 +4,7 @@
     "private": true,
     "type": "module",
     "exports": {
+        "./contracts/auth": "./contracts/auth.ts",
         "./contracts/hold": "./contracts/hold.ts",
         "./errorCodes": "./errorCodes.ts",
         "./limits": "./limits.ts",

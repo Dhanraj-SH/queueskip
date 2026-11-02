@@ -6,15 +6,21 @@ const readiness = vi.hoisted(() => ({
     criticalRedisStatus: 'ready',
 }));
 
-vi.mock('mongoose', () => ({
-    default: {
-        connection: {
-            get readyState() {
-                return readiness.mongoReady ? 1 : 0;
+vi.mock('mongoose', async (importOriginal) => {
+    const mongoose = await importOriginal<typeof import('mongoose')>();
+
+    return {
+        ...mongoose,
+        default: {
+            ...mongoose.default,
+            connection: {
+                get readyState() {
+                    return readiness.mongoReady ? 1 : 0;
+                },
             },
         },
-    },
-}));
+    };
+});
 
 vi.mock('../src/config/redis.js', () => ({
     cacheRedis: {
