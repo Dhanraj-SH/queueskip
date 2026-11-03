@@ -1,15 +1,11 @@
 import type { LoginUserData, RegisterUserData } from '@queueskip/shared/contracts/auth';
 import argon2 from 'argon2';
 import { userStatus } from '@queueskip/shared/statuses';
-import {
-    createUserByData,
-    findUserByEmail,
-    findUserByEmailForLogin,
-    type UserDocument,
-} from '../repositories/userRepositories';
+import { createUserByData, findUserByEmail, findUserByEmailForLogin, findUserById, type UserDocument, } from '../repositories/userRepositories';
 import { AppError } from '../utils/appError';
 import { generateAccessToken } from '../utils/generateAccessToken';
 import { generateRefreshToken } from '../utils/generateRefreshToken';
+import { verifyRefreshToken } from '../utils/verifyRefreshToken';
 
 const issueToken = (user: UserDocument) => {
     return {
@@ -55,4 +51,15 @@ export const loginUserService = async (loginData: LoginUserData) => {
     await user.save();
 
     return issueToken(user);
+};
+
+export const refreshSessionService = async (refreshToken: string): Promise<string> => {
+    const decoded = verifyRefreshToken(refreshToken);
+    const user = await findUserById(decoded.userId);
+
+    if (!user || user.tokenVersion !== decoded.tokenVersion || user.status !== userStatus.active) {
+        throw new AppError('Refresh token is no longer valid', 401);
+    }
+
+    return generateAccessToken(user._id.toString(), user.tokenVersion);
 };

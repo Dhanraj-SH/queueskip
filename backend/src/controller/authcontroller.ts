@@ -1,14 +1,25 @@
-import type { RequestHandler } from 'express';
+import type { RequestHandler, Request } from 'express';
 import { loginSchema, registerSchema } from '@queueskip/shared/contracts/auth';
 import { env } from '../config/env';
-import { createUserService, loginUserService } from '../service/authService';
+import { createUserService, loginUserService, refreshSessionService } from '../service/authService';
+import { COOKIE_NAME, REFRESH_TOKEN_AGE, setRefreshCookie } from '../utils/refreshCookie';
 
 const refreshCookieOptions = {
     httpOnly: true,
     secure: env.NODE_ENV === 'production',
     sameSite: 'lax' as const,
     path: '/api/auth',
-    maxAge: 7 * 24 * 60 * 60 * 1000,
+    maxAge: REFRESH_TOKEN_AGE,
+};
+
+const readRefreshToken = (req: Request): string | undefined => {
+    const fromCookie: unknown = req.cookies?.[COOKIE_NAME];
+    if(typeof fromCookie === 'string' && fromCookie){
+        return fromCookie;
+    }
+
+    const fromBody: unknown = req.body?.refreshToken;
+    return typeof fromBody === "string" && fromBody ? fromBody : undefined;
 };
 
 export const createUser: RequestHandler = async (req, res, next): Promise<void> => {
@@ -33,7 +44,8 @@ export const loginUser: RequestHandler = async (req, res, next): Promise<void> =
             loginSchema.parse(req.body),
         );
 
-        res.cookie('queueskip_refresh', refreshToken, refreshCookieOptions);
+        setRefreshCookie(res, refreshToken);
+
         res.status(200).json({
             data: {
                 name: user.name,
@@ -45,4 +57,19 @@ export const loginUser: RequestHandler = async (req, res, next): Promise<void> =
     } catch (error) {
         next(error);
     }
+};
+
+export const refresh: RequestHandler = async(req, res, next): Promise<void> => {
+    const refreshToken = readRefreshToken(req);
+
+    if(!refreshToken){
+        res.status(401).json({
+            message: "Refresh token required"
+        });
+        return;
+    }
+    
+    res.status(200).json({
+        accessToken: await refreshSessionService(refreshToken)
+    });
 };

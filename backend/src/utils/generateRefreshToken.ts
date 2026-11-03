@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import { env } from '../config/env';
+import { REFRESH_TOKEN_AGE } from './refreshCookie';
 
 export const generateRefreshToken = (userId: string, tokenVersion: number): string => {
     return jwt.sign(
@@ -10,7 +11,7 @@ export const generateRefreshToken = (userId: string, tokenVersion: number): stri
         env.JWT_REFRESH_SECRET,
         {
             algorithm: "HS256",
-            expiresIn: "7d"
+            expiresIn: REFRESH_TOKEN_AGE
         }
     );
 };
