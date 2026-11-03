@@ -1,11 +1,18 @@
 import User, { type UserRecord } from '../models/User';
+import type { HydratedDocument } from 'mongoose';
 
-export const findUserByEmail = async (email: string): Promise<UserRecord | null> => {
+export type UserDocument = HydratedDocument<UserRecord>;
+
+export const findUserByEmail = async (email: string): Promise<UserDocument | null> => {
     return User.findOne({ email });
+};
+
+export const findUserByEmailForLogin = async (email: string): Promise<UserDocument | null> => {
+    return User.findOne({ email }).select('+passwordHash +tokenVersion');
 };
 
 type NewUserData = Pick<UserRecord, 'name' | 'email' | 'passwordHash'>;
 
-export const createUserByData = async (userData: NewUserData): Promise<UserRecord> => {
+export const createUserByData = async (userData: NewUserData): Promise<UserDocument> => {
     return User.create(userData);
 };

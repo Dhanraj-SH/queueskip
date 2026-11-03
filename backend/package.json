@@ -11,10 +11,12 @@
     },
     "dependencies": {
         "@queueskip/shared": "*",
-        "argon2": "^0.45.1",
+        "@types/jsonwebtoken": "^9.0.10",
+        "argon2": "^0.45.2",
         "dotenv": "^16.4.7",
         "express": "^5.1.0",
         "ioredis": "^5.11.1",
+        "jsonwebtoken": "^9.0.3",
         "mongoose": "^8.19.0",
         "zod": "^4.6.7"
     },

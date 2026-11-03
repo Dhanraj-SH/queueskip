@@ -1,7 +1,6 @@
 import mongoose, { Schema } from 'mongoose';
 import type { InferSchemaType } from 'mongoose';
 import { userRole, userStatus } from '@queueskip/shared/statuses';
-import { env } from '../config/env';
 
 const userSchema = new Schema(
     {
@@ -54,7 +53,6 @@ const userSchema = new Schema(
     },
     {
         timestamps: true,
-        autoIndex: env.NODE_ENV !== 'production',
     },
 );
 

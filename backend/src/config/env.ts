@@ -7,6 +7,8 @@ const envSchema = z.object({
     MONGODB_URI: z.string().min(1),
     REDIS_CRITICAL_URL: z.string().min(1),
     REDIS_CACHE_URL: z.string().min(1),
+    JWT_ACCESS_SECRET: z.string().trim().min(16),
+    JWT_REFRESH_SECRET: z.string().trim().min(16),
     SMTP_HOST: z.string().default('localhost'),
     SMTP_PORT: z.coerce.number().int().positive().default(1025),
     MAIL_FROM: z.string().min(1),
