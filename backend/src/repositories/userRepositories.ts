@@ -20,3 +20,7 @@ type NewUserData = Pick<UserRecord, 'name' | 'email' | 'passwordHash'>;
 export const createUserByData = async (userData: NewUserData): Promise<UserDocument> => {
     return await User.create(userData);
 };
+
+export const incrementTokenVersion = async (userId: string): Promise<void> => {
+    await User.findOneAndUpdate({ _id: userId }, { $inc: { tokenVersion: 1 } });
+};

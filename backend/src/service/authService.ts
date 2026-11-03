@@ -1,7 +1,14 @@
 import type { LoginUserData, RegisterUserData } from '@queueskip/shared/contracts/auth';
 import argon2 from 'argon2';
 import { userStatus } from '@queueskip/shared/statuses';
-import { createUserByData, findUserByEmail, findUserByEmailForLogin, findUserById, type UserDocument, } from '../repositories/userRepositories';
+import {
+    createUserByData,
+    findUserByEmail,
+    findUserByEmailForLogin,
+    findUserById,
+    incrementTokenVersion,
+    type UserDocument,
+} from '../repositories/userRepositories';
 import { AppError } from '../utils/appError';
 import { generateAccessToken } from '../utils/generateAccessToken';
 import { generateRefreshToken } from '../utils/generateRefreshToken';
@@ -62,4 +69,24 @@ export const refreshSessionService = async (refreshToken: string): Promise<strin
     }
 
     return generateAccessToken(user._id.toString(), user.tokenVersion);
+};
+
+export const logoutSessionService = async (refreshToken: string | undefined): Promise<void> => {
+    if (!refreshToken) {
+        return;
+    }
+
+    let decoded: ReturnType<typeof verifyRefreshToken>;
+
+    try {
+        decoded = verifyRefreshToken(refreshToken);
+    } catch {
+        return;
+    }
+
+    const user = await findUserById(decoded.userId);
+
+    if (user && user.tokenVersion === decoded.tokenVersion) {
+        await incrementTokenVersion(user._id.toString());
+    }
 };
