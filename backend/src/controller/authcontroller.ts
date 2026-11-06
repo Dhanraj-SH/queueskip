@@ -1,7 +1,14 @@
 import type { RequestHandler, Request } from 'express';
 import { loginSchema, registerSchema } from '@queueskip/shared/contracts/auth';
-import { createUserService, loginUserService, logoutSessionService, refreshSessionService } from '../service/authService';
+import {
+    createUserService,
+    fetchUserService,
+    loginUserService,
+    logoutSessionService,
+    refreshSessionService,
+} from '../service/authService';
 import { clearRefreshCookie, COOKIE_NAME, setRefreshCookie } from '../utils/refreshCookie';
+import { requireUserId } from '../middleware/authMiddleware';
 
 const readRefreshToken = (req: Request): string | undefined => {
     const fromCookie: unknown = req.cookies?.[COOKIE_NAME];
@@ -30,7 +37,9 @@ export const createUser: RequestHandler = async (req, res, next): Promise<void> 
 
 export const loginUser: RequestHandler = async (req, res, next): Promise<void> => {
     try {
-        const { user, accessToken, refreshToken } = await loginUserService(loginSchema.parse(req.body));
+        const { user, accessToken, refreshToken } = await loginUserService(
+            loginSchema.parse(req.body),
+        );
 
         setRefreshCookie(res, refreshToken);
 
@@ -70,4 +79,10 @@ export const logout: RequestHandler = async (req, res): Promise<void> => {
     res.status(200).json({
         message: 'Logout successful',
     });
+};
+
+export const fetchUser: RequestHandler = async (req, res): Promise<void> => {
+    const user = await fetchUserService(requireUserId(req));
+
+    res.status(200).json({ user });
 };

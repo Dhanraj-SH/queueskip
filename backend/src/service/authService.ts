@@ -90,3 +90,19 @@ export const logoutSessionService = async (refreshToken: string | undefined): Pr
         await incrementTokenVersion(user._id.toString());
     }
 };
+
+export const fetchUserService = async (userId: string) => {
+    const user = await findUserById(userId);
+
+    if (!user || user.status !== userStatus.active) {
+        throw new AppError('User not found', 404);
+    }
+
+    return {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        emailVerified: user.emailVerified,
+    };
+};

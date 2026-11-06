@@ -1,53 +1,63 @@
-import { NextFunction, Request, Response } from "express";
+import type { Request, RequestHandler } from 'express';
 import jwt from 'jsonwebtoken';
-import { AppError } from "../utils/appError";
-import { env } from "../config/env";
-import { findUserById } from "../repositories/userRepositories";
+import { userStatus } from '@queueskip/shared/statuses';
+import { findUserById } from '../repositories/userRepositories';
+import { env } from '../config/env';
+import { AppError } from '../utils/appError';
 
-export interface AuthenticatedRequest extends Request {
-    userId: string;
-};
+const isAccessTokenPayload = ( payload: string | jwt.JwtPayload ): payload is jwt.JwtPayload & { userId: string; tokenVersion: number } =>
+    typeof payload !== 'string' &&
+    typeof payload.userId === 'string' &&
+    /^[a-f\d]{24}$/i.test(payload.userId) &&
+    typeof payload.tokenVersion === 'number' &&
+    Number.isInteger(payload.tokenVersion) &&
+    payload.tokenVersion >= 0;
 
-export const authrnticate = async (req: AuthenticatedRequest, _res: Response, next: NextFunction): Promise<void> => {
-    const authorization = req.headers.authorization;
+export const authenticate: RequestHandler = async (req, _res, next): Promise<void> => {
+    const [scheme, token, ...extraParts] = req.get('authorization')?.trim().split(/\s+/) ?? [];
 
-    if(!authorization){
-        next(new AppError("Authentication required", 401));
+    if (scheme?.toLowerCase() !== 'bearer' || !token || extraParts.length > 0) {
+        next(new AppError('Authentication is required', 401));
         return;
     }
 
-    const [schema, token] = authorization.split(" ");
+    let payload: string | jwt.JwtPayload;
 
-    if(schema !== "Bearer" || !token) {
-        next(new AppError("Invalid authozization header", 401));
+    try {
+        payload = jwt.verify(token, env.JWT_ACCESS_SECRET, { algorithms: ['HS256'] });
+    } catch {
+        next(new AppError('Invalid or expired access token', 401));
+        return;
+    }
+
+    if (!isAccessTokenPayload(payload)) {
+        next(new AppError('Invalid access token payload', 401));
         return;
     }
 
     try {
-        const decoded = jwt.verify(token, env.JWT_ACCESS_SECRET, {algorithms: ["HS256"]});
+        const user = await findUserById(payload.userId);
 
-        if(typeof decoded === 'string' || typeof decoded.userId !== 'string' || typeof decoded.tokenVersion !== 'number') {
-            next(new AppError("Invalid token payload", 401));
+        if (
+            !user ||
+            user.tokenVersion !== payload.tokenVersion ||
+            user.status !== userStatus.active
+        ) {
+            next(new AppError('Session is no longer valid', 401));
             return;
         }
 
-        const user = await findUserById(decoded.userId);
-
-        if(!user || user.tokenVersion !== decoded.tokenVersion || user.status !== 'ACTIVE'){
-            next(new AppError("Session is no longer vaild", 401));
-            return;
-        }
-
-        req.userId = decoded.userId;
+        req.userId = user.id;
+        req.userRole = user.role;
         next();
-    } catch {
-        next(new AppError("Invalid or expired token", 401));
+    } catch (error) {
+        next(error);
     }
 };
 
-export const requireUserId = (req: AuthenticatedRequest): string => {
+export const requireUserId = (req: Request): string => {
     if (!req.userId) {
-        throw new AppError("Authentication required", 401);
+        throw new AppError('Authentication is required', 401);
     }
 
     return req.userId;
