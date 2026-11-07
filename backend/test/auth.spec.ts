@@ -35,6 +35,7 @@ describe('POST /api/auth/register', () => {
                 name: 'Registration User',
                 email: 'registration@example.test',
             },
+            message: 'User registered'
         });
         expect(response.text).not.toContain('passwordHash');
         expect(response.text).not.toContain('tokenVersion');
