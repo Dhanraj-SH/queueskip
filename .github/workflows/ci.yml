@@ -29,34 +29,18 @@ jobs:
                 ports:
                     - 6380:6379
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@v4.2.2
             - uses: actions/setup-node@v4
               with:
                   node-version: 24
                   cache: npm
             - run: npm ci
             - name: Start MongoDB replica set
-              run: |
-                  docker run --detach --name queueskip-mongodb --publish 27017:27017 mongo:8.0 mongod --replSet rs0 --bind_ip_all
-
-                  for attempt in $(seq 1 30); do
-                      if docker exec queueskip-mongodb mongosh --quiet --eval "db.adminCommand('ping').ok" 2>/dev/null | grep -q 1; then
-                          break
-                      fi
-                      sleep 2
-                  done
-
-                  docker exec queueskip-mongodb mongosh --quiet --eval "rs.initiate({_id: 'rs0', members: [{_id: 0, host: '127.0.0.1:27017'}]})"
-
-                  for attempt in $(seq 1 30); do
-                      if docker exec queueskip-mongodb mongosh --quiet --eval "db.hello().isWritablePrimary" 2>/dev/null | grep -q true; then
-                          exit 0
-                      fi
-                      sleep 2
-                  done
-
-                  echo "MongoDB replica set did not become ready" >&2
-                  exit 1
+              id: start_mongo
+              run: docker compose up --detach --wait --wait-timeout 120 mongo
+            - name: Show MongoDB logs if startup fails
+              if: failure() && steps.start_mongo.outcome == 'failure'
+              run: docker compose logs --no-color mongo
             - run: npm run lint
             - run: npm run typecheck
             - run: npm test
