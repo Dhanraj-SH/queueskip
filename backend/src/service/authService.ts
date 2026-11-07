@@ -1,14 +1,16 @@
 import type { LoginUserData, RegisterUserData } from '@queueskip/shared/contracts/auth';
 import argon2 from 'argon2';
-import { userStatus } from '@queueskip/shared/statuses';
+import { userRole, userStatus } from '@queueskip/shared/statuses';
 import {
     createUserByData,
     findUserByEmail,
     findUserByEmailForLogin,
     findUserById,
+    hasAdminUser,
     incrementTokenVersion,
     type UserDocument,
 } from '../repositories/userRepositories';
+import { env } from '../config/env';
 import { AppError } from '../utils/appError';
 import { generateAccessToken } from '../utils/generateAccessToken';
 import { generateRefreshToken } from '../utils/generateRefreshToken';
@@ -33,11 +35,13 @@ export const createUserService = async (userData: RegisterUserData) => {
     }
 
     const passwordHash = await argon2.hash(userData.password);
+    const isFirstAdmin = userData.email === env.ADMIN_EMAIL && !(await hasAdminUser());
 
     return createUserByData({
         name: userData.name,
         email: userData.email,
         passwordHash,
+        ...(isFirstAdmin ? { role: userRole.admin } : {}),
     });
 };
 

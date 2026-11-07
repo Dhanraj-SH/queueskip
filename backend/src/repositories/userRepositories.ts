@@ -1,5 +1,6 @@
 import User, { type UserRecord } from '../models/User';
 import type { HydratedDocument } from 'mongoose';
+import { userRole } from '@queueskip/shared/statuses';
 
 export type UserDocument = HydratedDocument<UserRecord>;
 
@@ -15,7 +16,11 @@ export const findUserByEmailForLogin = async (email: string): Promise<UserDocume
     return await User.findOne({ email }).select('+passwordHash +tokenVersion');
 };
 
-type NewUserData = Pick<UserRecord, 'name' | 'email' | 'passwordHash'>;
+export const hasAdminUser = async (): Promise<boolean> => {
+    return (await User.exists({ role: userRole.admin })) !== null;
+};
+
+type NewUserData = Pick<UserRecord, 'name' | 'email' | 'passwordHash'> & Partial<Pick<UserRecord, 'role'>>;
 
 export const createUserByData = async (userData: NewUserData): Promise<UserDocument> => {
     return await User.create(userData);

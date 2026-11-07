@@ -13,6 +13,7 @@ jobs:
             MONGO_IMAGE: mongo:7.0.45-jammy
             JWT_ACCESS_SECRET: ci-only-access-secret-change-before-use
             JWT_REFRESH_SECRET: ci-only-refresh-secret-change-before-use
+            ADMIN_EMAIL: admin@queueskip.test
             MONGODB_URI: mongodb://127.0.0.1:27017/queueskip?replicaSet=rs0
             MONGODB_TEST_URI: mongodb://127.0.0.1:27017/queueskip_test?replicaSet=rs0
             REDIS_CRITICAL_URL: redis://127.0.0.1:6379
