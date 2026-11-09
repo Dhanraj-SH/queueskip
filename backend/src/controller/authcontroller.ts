@@ -1,12 +1,6 @@
 import type { RequestHandler, Request } from 'express';
 import { loginSchema, registerSchema } from '@queueskip/shared/contracts/auth';
-import {
-    createUserService,
-    fetchUserService,
-    loginUserService,
-    logoutSessionService,
-    refreshSessionService,
-} from '../service/authService';
+import { createUserService, fetchUserService, loginUserService, logoutSessionService, refreshSessionService, } from '../service/authService';
 import { clearRefreshCookie, COOKIE_NAME, setRefreshCookie } from '../utils/refreshCookie';
 import { requireUserId } from '../middleware/authMiddleware';
 

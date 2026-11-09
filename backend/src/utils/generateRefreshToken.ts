@@ -11,7 +11,7 @@ export const generateRefreshToken = (userId: string, tokenVersion: number): stri
         env.JWT_REFRESH_SECRET,
         {
             algorithm: "HS256",
-            expiresIn: REFRESH_TOKEN_AGE
+            expiresIn: REFRESH_TOKEN_AGE / 1000
         }
     );
 };
