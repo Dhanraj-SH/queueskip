@@ -1,6 +1,6 @@
 import User, { type UserRecord } from '../models/User';
 import type { HydratedDocument } from 'mongoose';
-import { userRole } from '@queueskip/shared/statuses';
+import { userRole } from '../utils/constants';
 
 export type UserDocument = HydratedDocument<UserRecord>;
 

@@ -1,6 +1,6 @@
 import mongoose, { Schema } from 'mongoose';
 import type { InferSchemaType } from 'mongoose';
-import { userRole, userStatus } from '@queueskip/shared/statuses';
+import { userRole, userStatus } from '../utils/constants';
 
 const userSchema = new Schema(
     {
@@ -21,6 +21,16 @@ const userSchema = new Schema(
         emailVerified: {
             type: Boolean,
             default: false,
+        },
+        verifyTokenHash: {
+            type: String,
+            default: null,
+            select: false,
+        },
+        verifyTokenExpires: {
+            type: Date,
+            default: null,
+            select: false,
         },
         passwordHash: {
             type: String,

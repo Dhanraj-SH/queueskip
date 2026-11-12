@@ -1,6 +1,6 @@
 import type { Request, RequestHandler } from 'express';
 import jwt from 'jsonwebtoken';
-import { userStatus } from '@queueskip/shared/statuses';
+import { userStatus } from '../utils/constants';
 import { findUserById } from '../repositories/userRepositories';
 import { env } from '../config/env';
 import { AppError } from '../utils/appError';

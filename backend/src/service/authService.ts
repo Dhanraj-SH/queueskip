@@ -1,6 +1,6 @@
-import type { LoginUserData, RegisterUserData } from '@queueskip/shared/contracts/auth';
+import type { LoginUserData, RegisterUserData } from '../validators/auth';
 import argon2 from 'argon2';
-import { userRole, userStatus } from '@queueskip/shared/statuses';
+import { userRole, userStatus } from '../utils/constants';
 import {
     createUserByData,
     findUserByEmail,
