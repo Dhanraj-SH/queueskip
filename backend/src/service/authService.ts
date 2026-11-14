@@ -1,15 +1,7 @@
 import type { LoginUserData, RegisterUserData } from '../validators/auth';
 import argon2 from 'argon2';
 import { userRole, userStatus } from '../utils/constants';
-import {
-    createUserByData,
-    findUserByEmail,
-    findUserByEmailForLogin,
-    findUserById,
-    hasAdminUser,
-    incrementTokenVersion,
-    type UserDocument,
-} from '../repositories/userRepositories';
+import { createUserByData, findUserByEmail, findUserByEmailForLogin, findUserById, hasAdminUser, incrementTokenVersion, type UserDocument, } from '../repositories/userRepositories';
 import { env } from '../config/env';
 import { AppError } from '../utils/appError';
 import { generateAccessToken } from '../utils/generateAccessToken';

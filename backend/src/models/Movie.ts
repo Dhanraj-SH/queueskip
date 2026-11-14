@@ -2,6 +2,8 @@ import mongoose, { Schema } from 'mongoose';
 import type { InferSchemaType } from 'mongoose';
 import { movieGenres } from '../utils/genres';
 import { movieStatus } from '../utils/constants';
+import { movieLanguages } from '../utils/languages';
+import { movieCertifications } from '../utils/certifications';
 
 const castMemberSchema = new Schema(
     {
@@ -75,7 +77,7 @@ const movieSchema = new Schema(
             type: String,
             required: true,
             lowercase: true,
-            match: /^[a-z]{2}$/,
+            enum: movieLanguages,
         },
         releaseDate: {
             type: Date,
@@ -85,6 +87,8 @@ const movieSchema = new Schema(
             type: String,
             required: true,
             trim: true,
+            uppercase: true,
+            enum: movieCertifications,
         },
         posterUrl: {
             type: String,

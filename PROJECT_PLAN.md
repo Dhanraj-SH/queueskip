@@ -693,9 +693,92 @@ npx autocannon -c 50 -a 50 -m POST \
   - Make email sending fail (put a wrong `SMTP_HOST` in `.env`): the worker terminal shows retries at growing gaps, then the job stays in the failed list.
   - Run two worker copies and pay for several orders: each order gets its tickets exactly once, and `sweepOrders` runs once a minute, not twice.
 
-## 10. API
+## 10. API (routes)
 
-The full list, with who may call each route, the rate limit and the handler name, is in the code reference, **section 8**.
+"fail closed" means the request is blocked if Redis is down; everything else lets the request through. "Global" means the whole `/api` area is limited to 300 requests per minute per IP (in `app.ts`).
+
+### 10.1 Every route
+
+| Method and path | Who | Limit | Handler | What it does |
+|---|---|---|---|---|
+| **Auth** `/api/auth` | | | | |
+| POST `/register` | public | 5 per hour per IP, fail closed | `registerUser` | create the user (email lowercased, bcrypt hash), create a `VERIFY` token, queue the verification email |
+| POST `/login` | public | 5 per minute per IP, fail closed | `loginUser` | check the password; return the access token and set the refresh cookie; set `lastLoginAt` |
+| POST `/refresh` | refresh cookie | 30 per minute per IP | `refreshToken` | new access token if the cookie is valid and `tokenVersion` matches |
+| POST `/logout` | logged in | none | `logoutUser` | add 1 to `tokenVersion`, clear the cookie |
+| GET `/me` | logged in | none | `getCurrentUser` | the current user |
+| POST `/verify-email` | public | 10 per hour per IP | `verifyEmail` | hash the token, find it, check expiry and `usedAt`, mark the user verified |
+| POST `/resend-verification` | public | 3 per hour per IP, fail closed | `resendVerification` | same answer whether or not the email exists |
+| POST `/forgot-password` | public | 3 per hour per IP, fail closed | `forgotPassword` | create a `RESET` token, queue the email; same answer either way |
+| POST `/reset-password` | public | 5 per hour per IP, fail closed | `resetPassword` | check the token, set the new hash, add 1 to `tokenVersion` |
+| POST `/google` | public | 10 per minute per IP, fail closed | `googleLogin` | check the Google ID token, find the user by Google `sub` in `OAuthAccount`, or create or link one |
+| **Movies** `/api/movies` | | | | |
+| GET `/` | public | global; search queries 60 per minute per IP | `listMovies` | optional text search `q` plus `genre`, `language`, `status` filters; paging `page`, `limit` |
+| GET `/:id` | public | global | `getMovieById` | Bloom filter, then cache, then MongoDB; counts a view |
+| GET `/:id/similar` | public | global | `getSimilarMovies` | movies that share genres, best rated first |
+| GET `/:id/shows?city=&date=` | public | global | `listShowsForMovie` | showtimes grouped by theatre |
+| GET `/:id/reviews` | public | global | `listReviews` | `sort` by recent, helpful or rating; paged |
+| PUT `/:id/reviews/me` | verified user | 10 per hour per user | `saveMyReview` | create or update my review; adjust the rating totals; set `verifiedViewer` from my orders |
+| DELETE `/:id/reviews/me` | logged in | none | `deleteMyReview` | delete it, take it out of the totals |
+| **People and reviews** | | | | |
+| GET `/api/people/:id` | public | global | `getPersonById` | bio and the movies this person worked on (`cast.personId`, `crew.personId`) |
+| POST `/api/reviews/:id/helpful` | verified user | 30 per hour per user | `voteReviewHelpful` | toggle my vote; `helpfulCount` changes by `$inc` only if the vote row changed |
+| POST `/api/reviews/:id/report` | verified user | 10 per hour per user | `reportReview` | add a `ReviewReport`; `reportCount` goes up by 1 |
+| **Watchlist** `/api/watchlist` (all need login) | | | | |
+| GET `/` | logged in | global | `getWatchlist` | my watchlist |
+| POST `/` | logged in | global | `addToWatchlist` | body `{ movieId }`; adding twice does nothing; records a `WATCHLIST` signal |
+| GET `/:movieId/status` | logged in | global | `checkWatchlistStatus` | returns `{ inWatchlist: true or false }` |
+| DELETE `/:movieId` | logged in | global | `removeFromWatchlist` | 404 if it was not there |
+| **Shows** `/api/shows` | | | | |
+| GET `/:id` | public | global | `getShow` | the show with movie and theatre details |
+| GET `/:id/seats` | public | global | `getShowSeats` | sold seats from MongoDB, held seats from Redis (`getHeldSeatIds`) |
+| POST `/:id/scan` | admin or manager | global | `scanTicket` | one atomic update sets `usedAt` and `usedByUserId`; a second scan is refused |
+| **Holds** `/api/holds` | | | | |
+| POST `/` | verified user | 10 per minute per user | `holdSeats` | body `{ showId, seatIds }`; check the seats exist and are `AVAILABLE`, then `tryHold` |
+| DELETE `/:holdId` | logged in | global | `releaseHold` | `releaseHoldById` for my own hold |
+| **Orders** `/api/orders` (all need login) | | | | |
+| POST `/` | verified user | 10 per minute per user | `createOrder` | body `{ holdId }` plus header `Idempotency-Key`; creates `PENDING_PAYMENT`, extends the hold, saves `order.created` |
+| GET `/` | logged in | global | `listMyOrders` | my orders, newest first |
+| GET `/:id` | logged in | global | `getOrder` | only my own order |
+| POST `/:id/coupon` | logged in | 10 per minute per user, fail closed | `applyCoupon` | atomic claim of one use, a `RESERVED` redemption, recalculate the total |
+| DELETE `/:id/coupon` | logged in | global | `removeCoupon` | release the redemption and give the use back |
+| POST `/:id/pay` | logged in | global | `payOrder` | create the `Payment`; with the fake provider call `confirmPayment` straight away |
+| POST `/:id/cancel` | logged in | global | `cancelOrder` | cancel a pending order, release the hold and the coupon |
+| GET `/:id/tickets` | logged in | global | `listOrderTickets` | tickets with QR codes (`qrcode` package, from `ticketCode`) |
+| **Other** | | | | |
+| POST `/api/webhooks/payments` | payment provider | none | `handlePaymentWebhook` | check the signature on the raw body, insert a `PaymentEvent` (a repeat is refused), call `confirmPayment` |
+| GET `/api/offers` | public | global | `listOffers` | enabled offers in their date range, with the coupon code |
+| GET `/api/me/recommendations` | logged in | global | `getMyRecommendations` | genres from my `UserMovieSignal` rows, weighted |
+| GET `/health` | public | none | (in `app.ts`) | `{ mongo, redis }` |
+| **Admin only** `/api/admin` | | | | |
+| POST `/people` | admin | global | `createPerson` | add a person |
+| POST `/movies` | admin | global | `createMovie` | adds the id to the Bloom filter first |
+| PATCH `/movies/:id` | admin | global | `updateMovie` | also deletes the cache entry |
+| PUT `/movies/:id/cast` | admin | global | `setMovieCast` | replaces `cast` and `crew`, copying each person's name |
+| POST `/coupons` | admin | global | `createCoupon` | also adds the code to the Bloom filter |
+| GET `/coupons` | admin | global | `listCoupons` | all coupons |
+| PATCH `/coupons/:id` | admin | global | `updateCoupon` | enable, disable, change dates |
+| POST `/offers` | admin | global | `createOffer` | add an offer |
+| PATCH `/offers/:id` | admin | global | `updateOffer` | change or disable it |
+| GET `/reviews/reported` | admin | global | `listReportedReviews` | the moderation queue |
+| PATCH `/reviews/:id` | admin | global | `moderateReview` | hide or restore a review, resolve its reports |
+| **Admin or the theatre's manager** `/api/admin` | | | | |
+| POST `/theatres` | admin or manager | global | `createTheatre` | a manager can only create theatres they manage |
+| POST `/theatres/:id/screens` | admin or manager | global | `createScreen` | the controller checks `theatre.managerId` |
+| POST `/shows` | admin or manager | global | `createShow` | in a transaction: bump the screen's `showWriteVersion`, check for overlap, create the show and one `ShowSeat` per seat |
+| POST `/shows/:id/cancel` | admin or manager | global | `cancelShow` | mark the show cancelled; every paid order becomes `REFUND_PENDING` with a `Refund` and a queued job |
+
+### 10.2 Who can do what
+
+| Role | Can do |
+|---|---|
+| Not logged in | browse movies, people, reviews, showtimes, seat maps and offers; register, log in, verify email, reset password |
+| `USER` (verified email) | everything above, plus review, vote on reviews, report, use the watchlist, hold seats, create orders, pay, apply coupons, see own tickets |
+| `USER` (email not verified) | browse, watchlist, see own orders; blocked from holds, orders and reviews with `EMAIL_NOT_VERIFIED` |
+| `MANAGER` | everything a user can do, plus create theatres and screens (only for theatres they manage), create and cancel shows, scan tickets |
+| `ADMIN` | everything, plus the catalog (movies, people, cast), coupons, offers and review moderation |
+
+The route files that implement this table are in `queueskip_code_reference.md`, section 8.
 
 ## 11. Interview questions this plan prepares you for
 
