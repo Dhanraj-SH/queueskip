@@ -52,3 +52,7 @@ export const listMovie = async (query: ListMovieQuery) => {
         },
     };
 };
+
+export const getMovieById = async(movieId: string) => {
+    return await Movie.findById(movieId);
+};

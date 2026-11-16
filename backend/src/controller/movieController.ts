@@ -1,12 +1,38 @@
 import type { RequestHandler } from 'express';
-import { listMovieService } from '../service/movieService';
+import { fetchMovieService, listMovieService } from '../service/movieService';
 import { listMovieQuerySchema } from '../validators/movie';
+import { validateObjectId } from '../validators/common';
 
-export const getMovieList: RequestHandler = async (req, res): Promise<void> => {
-    const { movie, meta } = await listMovieService(listMovieQuerySchema.parse(req.query));
+export const getMovieList: RequestHandler = async (req, res, next): Promise<void> => {
+    try{
+        const { movie, meta } = await listMovieService(listMovieQuerySchema.parse(req.query));
+    
+        res.status(200).json({
+            movie,
+            meta,
+        });
+    } catch(error) {
+        next(error);
+    }
+};
 
-    res.status(200).json({
-        movie,
-        meta,
-    });
+export const getMovie: RequestHandler = async (req, res, next): Promise<void> => {
+    try {
+        const movieId = validateObjectId.parse(req.params.id);
+        const movie = await fetchMovieService(movieId);
+    
+        if(!movie){
+            res.status(404).json({
+                message: "Movie not found"
+            });
+
+            return;
+        }
+
+        res.status(200).json({
+            movie
+        });
+    } catch(error) {
+        next(error);
+    }
 };
