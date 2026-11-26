@@ -5,4 +5,8 @@ export const changePassword = z.object({
     newPassword: z.string().min(8).max(72),
 });
 
+export const updateProfile = z.object({
+    name: z.string().trim().min(2).max(60)
+});
+
 export type ChangePasswordData = z.infer<typeof changePassword>;

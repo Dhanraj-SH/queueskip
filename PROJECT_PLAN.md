@@ -676,7 +676,7 @@ queueSkip/
 | POST /api/auth/logout | logged in | `logout` | add 1 to `tokenVersion`, clear the cookie |
 | GET /api/auth/me | logged in | `fetchUser` | the current user, without `passwordHash` or `tokenVersion` |
 | PATCH /api/me | logged in | `updateMyProfile` | change my `name` (nothing else can be changed here) |
-| POST /api/me/change-password | logged in | `changeMyPassword` | needs the current password; new password 8 to 72 characters; add 1 to `tokenVersion` and give back fresh tokens |
+| POST /api/me/changePassword | logged in | `changeMyPassword` | needs the current password; new password 8 to 72 characters; add 1 to `tokenVersion` and give back fresh tokens |
 | GET /api/admin/users | admin | `listUsers` | search by name or email, filter by `role` and `status`, paged |
 | GET /api/admin/users/:id | admin | `getUserById` | one user (no password hash) |
 | PATCH /api/admin/users/:id | admin | `updateUser` | change `role` (this is how someone becomes a `MANAGER`) or `status`; suspending adds 1 to `tokenVersion`; an admin cannot change their own role or status |
@@ -1231,7 +1231,7 @@ npx autocannon -c 50 -a 50 -m POST \
 | 9 | POST /api/auth/google | public | 10 per minute per IP, fail closed | `googleLogin` | check the Google ID token; find the user by Google `sub` in `OAuthAccount`, or link or create one |
 | | **My account** | | | | |
 | 1 | PATCH /api/me | logged in | global | `updateMyProfile` | change my `name` (nothing else can be changed here) |
-| 1 | POST /api/me/change-password | logged in | 5 per hour per user, fail closed | `changeMyPassword` | needs the current password; new password 8 to 72 characters; add 1 to `tokenVersion` and give back fresh tokens |
+| 1 | POST /api/me/changePassword | logged in | 5 per hour per user, fail closed | `changeMyPassword` | needs the current password; new password 8 to 72 characters; add 1 to `tokenVersion` and give back fresh tokens |
 | 7 | GET /api/me/recommendations | logged in | global | `getMyRecommendations` | genres from my `UserMovieSignal` rows, weighted; falls back to top rated |
 | 11 | DELETE /api/me | logged in | global | `deleteMyAccount` | anonymise: placeholder name and email, clear the password, `status: DELETED`, delete watchlist, signals and OAuth rows; orders stay |
 | | **Admin: users** | | | | |
@@ -1328,7 +1328,7 @@ npx autocannon -c 50 -a 50 -m POST \
 
 | Resource | Create | Read | Update | Delete |
 |---|---|---|---|---|
-| **User** | `POST /auth/register` (public) | `GET /auth/me`; admin `GET /admin/users`, `/:id` | me: `PATCH /me` (name), `POST /me/change-password`; admin: `PATCH /admin/users/:id` (`role`, `status`) | no hard delete: `DELETE /me` anonymises the account; an admin suspends instead |
+| **User** | `POST /auth/register` (public) | `GET /auth/me`; admin `GET /admin/users`, `/:id` | me: `PATCH /me` (name), `POST /me/changePassword`; admin: `PATCH /admin/users/:id` (`role`, `status`) | no hard delete: `DELETE /me` anonymises the account; an admin suspends instead |
 | **Person** | admin `POST /admin/people` | public `GET /people/:id`; admin `GET /admin/people` | admin `PATCH` (also fixes the name copies in movies) | admin `DELETE`, refused while the person is in a movie |
 | **Movie** | admin `POST /admin/movies` | public list, search, detail, similar | admin `PATCH`; `PUT /admin/movies/:id/cast` | admin `DELETE`, refused while it has shows (set `ENDED` instead) |
 | **Review** | `PUT /movies/:id/reviews/me` | public list | the same `PUT` again; admin `PATCH` hides or restores | own `DELETE`; admin `DELETE` |

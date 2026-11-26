@@ -1,5 +1,5 @@
 import argon2 from 'argon2';
-import { changeUserPassword, findUserByIdForPasswordChange } from "../repositories/userRepositories";
+import { changeUserPassword, findUserById, findUserByIdForPasswordChange, updateUserProfile } from "../repositories/userRepositories";
 import { AppError } from "../utils/appError";
 import { userStatus } from "../utils/constants";
 import { ChangePasswordData } from "../validators/me";
@@ -30,4 +30,14 @@ export const changeMyPasswordService = async (userId: string, password: ChangePa
         accessToken: generateAccessToken(updatedUser.id, updatedUser.tokenVersion),
         refreshToken: generateRefreshToken(updatedUser.id, updatedUser.tokenVersion),
     };
+};
+
+export const updateMyProfileService = async(userId: string, newData: any) => {
+    const user = await findUserById(userId);
+
+    if(!user || user.status !== userStatus.active){
+        throw new AppError("Unauthorized or Inactive User", 401);
+    }
+
+    return await updateUserProfile(userId, newData.name);
 };

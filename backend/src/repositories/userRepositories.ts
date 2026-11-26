@@ -38,6 +38,14 @@ export const changeUserPassword = async (userId: string, passwordHash: string): 
     ).select('+tokenVersion');
 };
 
+export const updateUserProfile = async(userId: string, name: string): Promise<UserDocument | null> => {
+    return await User.findByIdAndUpdate(
+        userId,
+        { $set: {name} },
+        { returnDocument: "after", runValidators: true }
+    );
+};
+
 export const incrementTokenVersion = async (userId: string): Promise<void> => {
     await User.findOneAndUpdate({ _id: userId }, { $inc: { tokenVersion: 1 } });
 };
