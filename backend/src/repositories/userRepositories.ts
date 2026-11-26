@@ -12,6 +12,10 @@ export const findUserById = async (userId: string): Promise<UserDocument | null>
     return await User.findById(userId).select('+tokenVersion');
 };
 
+export const findUserByIdForPasswordChange = async (userId: string): Promise<UserDocument | null> => {
+    return await User.findById(userId).select('+passwordHash +tokenVersion');
+};
+
 export const findUserByEmailForLogin = async (email: string): Promise<UserDocument | null> => {
     return await User.findOne({ email }).select('+passwordHash +tokenVersion');
 };
@@ -24,6 +28,14 @@ type NewUserData = Pick<UserRecord, 'name' | 'email' | 'passwordHash'> & Partial
 
 export const createUserByData = async (userData: NewUserData): Promise<UserDocument> => {
     return await User.create(userData);
+};
+
+export const changeUserPassword = async (userId: string, passwordHash: string): Promise<UserDocument | null> => {
+    return await User.findByIdAndUpdate(
+        userId,
+        { $set: { passwordHash }, $inc: { tokenVersion: 1 } },
+        { returnDocument: "after", runValidators: true }
+    ).select('+tokenVersion');
 };
 
 export const incrementTokenVersion = async (userId: string): Promise<void> => {
