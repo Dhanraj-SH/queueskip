@@ -85,7 +85,7 @@ if count > limit: respond 429
 ```
 Weakness to mention: a burst at the edge of two windows can double the limit. The upgrade is a sliding window or a token bucket. If Redis is down: login is blocked (safe), browsing is allowed.
 
-**Bloom filter (built on Redis bits).** A row of 1,000,000 bits, all zero. To add an id, run it through 3 hash functions and switch those 3 bits on. To check an id, hash it the same way: if **any** bit is off it is **definitely not** there; if all are on it is **maybe** there. It never forgets an id (no wrong "no"), but sometimes says "maybe" for something that is not there (measured: 0.3 percent at 50,000 ids, about 2 percent at 100,000). Use: `GET /api/movies/:id` checks the filter first, and a "definitely not" returns 404 without touching MongoDB. Fill it from the database when the server starts, and add each new id **before** saving the movie. Limitation: you cannot remove an id; rebuild it now and then.
+**Bloom filter (built on Redis bits).** A row of 1,000,000 bits, all zero. To add an id, run it through 3 hash functions and switch those 3 bits on. To check an id, hash it the same way: if **any** bit is off it is **definitely not** there; if all are on it is **maybe** there. It never forgets an id (no wrong "no"), but sometimes says "maybe" for something that is not there (measured: 0.3 percent at 50,000 ids, about 2 percent at 100,000). Use: `GET /api/movies/:id` checks the filter first, and a "definitely not" returns 404 without touching MongoDB. Fill it from the database when the server starts, and add each new id **before** saving the movie. Limitation: you cannot remove an id; rebuild it now and then. If Redis is wiped or restarted the filter is empty, so it keeps a "ready" marker: until the marker exists every check answers "maybe", and real movies never turn into 404s.
 
 **Write-behind view counter.**
 ```
@@ -595,11 +595,13 @@ queueSkip/
 ├── backend/
 │   ├── src/
 │   │   ├── models/        26 files, one per collection (User.ts, Movie.ts, Order.ts, ...)
-│   │   ├── controllers/   authController.ts, movieController.ts, personController.ts, reviewController.ts, watchlistController.ts,
-│   │   │                  showController.ts, holdController.ts, orderController.ts, webhookController.ts, couponController.ts,
-│   │   │                  recommendationController.ts, adminController.ts
-│   │   ├── routes/        authRoutes.ts, movieRoutes.ts, personRoutes.ts, reviewRoutes.ts, watchlistRoutes.ts, showRoutes.ts,
-│   │   │                  holdRoutes.ts, orderRoutes.ts, webhookRoutes.ts, offerRoutes.ts, meRoutes.ts, adminRoutes.ts
+│   │   ├── controllers/   authController.ts, meController.ts, movieController.ts, personController.ts, reviewController.ts,
+│   │   │                  watchlistController.ts, showController.ts, holdController.ts, orderController.ts, webhookController.ts,
+│   │   │                  couponController.ts, recommendationController.ts,
+│   │   │                  adminUserController.ts, adminCatalogController.ts, adminVenueController.ts,
+│   │   │                  adminPromoController.ts, adminReviewController.ts, adminOrderController.ts     (85 handlers in all)
+│   │   ├── routes/        authRoutes.ts, meRoutes.ts, movieRoutes.ts, personRoutes.ts, reviewRoutes.ts, watchlistRoutes.ts,
+│   │   │                  showRoutes.ts, holdRoutes.ts, orderRoutes.ts, webhookRoutes.ts, offerRoutes.ts, adminRoutes.ts
 │   │   ├── services/      holdService.ts, orderService.ts, outboxService.ts, idempotencyService.ts   (plus pricing, recommendations later)
 │   │   ├── middleware/    auth.ts, requireRole.ts, requireVerified.ts, rateLimiter.ts, errorHandler.ts
 │   │   ├── cache/         movieCache.ts, bloomFilter.ts, viewCounter.ts
@@ -634,44 +636,552 @@ queueSkip/
 - Money is whole numbers (paise). Status words are the UPPER_SNAKE strings from `utils/constants.ts`.
 - With Mongoose 9 use `{ returnDocument: 'after' }` where older code used `{ new: true }`.
 
-## 8. Steps
+## 8. Steps, week by week
+
+**How to work through every week** (same routine each time):
+1. Add the week's models (code reference, section 3) and check them in `mongosh`: insert a document with a missing field, a bad enum value and a duplicate for each unique index, and confirm each is refused.
+2. For each route listed, replace its stub with the real handler: guards first (section 7 pattern), then the service call, then the response.
+3. Send the requests from Postman: the normal case, one wrong input, and someone else's data.
+4. After every write, look at the database with `mongosh` (and at Redis with `redis-cli` when the week uses it).
+5. Write one line in your notes: what you built, what broke, what you fixed.
+
+**Test accounts.** The seed script (Week 2) creates an admin, two managers and two users, all with `emailVerified: true`. Until Week 9 builds email verification, anyone you register by hand has `emailVerified: false`; fix it in `mongosh` with `db.users.updateOne({ email: 'a@b.com' }, { $set: { emailVerified: true } })`. Make the first admin the same way (`$set: { role: 'ADMIN' }`) until the seed exists.
 
 ### Week 0: setup (5 steps, we do these together)
 1. Check Node, npm, Git, Docker. Install Postman.
 2. Create the folder and the Git repo.
 3. Backend: `npm init`, install the packages, add `tsconfig.json` and `.env` (code reference, section 1).
 4. `docker-compose.yml` with MongoDB (replica set) and Redis (code reference, section 1).
-5. Copy the starter files (code reference, sections 2, 7, 8, 9) and the `User` model (section 3); start the API and open `/health`. Every route already exists and answers `501 Not built yet`; you replace one stub at a time.
+5. Copy the starter files (code reference, sections 2, 7, 8, 9) and the `User` model (section 3); start the API and open `/healthz`. Every route already exists and answers `501 Not built yet`.
 
-**Done when:** `/health` says `mongo: true` and `redis: true`, and `GET /api/movies` answers 501.
+**Done when:** `/healthz` says `{ status: 'ok' }`, `/readyz` reports MongoDB and Redis, and `GET /api/movies` answers 501.
 
-### Backend (one feature at a time: model, then controller, then check by hand)
+## Backend
 
-| Week | Build | Concepts | Done when |
+### Week 1: Accounts, login and user management
+
+**Goal:** people can register, log in and stay logged in; an admin can manage users and make someone a manager.
+
+**Models to add:** `User`.
+
+**Files to write:** `models/User.ts`; `controllers/authController.ts` (5 handlers), `meController.ts` (2 of 3), `adminUserController.ts` (3); `utils/tokens.ts` is already there.
+
+**Routes to build this week** (they already exist as stubs; replace each stub with the real handler):
+
+| Method and path | Who | Handler | What it does |
 |---|---|---|---|
-| 1 | `User`, register, login, refresh, logout, roles | 1, 2 | wrong password fails; a normal user gets 403 on an admin route |
-| 2 | `Movie`, `Person`, genres, cast, list, detail, search, seed data | 3 | search works; invalid id gives 400; `explain()` shows an index scan |
-| 3 | Reviews (votes, reports, moderation), watchlist | 5 (`$inc`) | a second review by one user updates, not duplicates; totals match |
-| 4 | `Theatre`, `Screen`, `Show`, `ShowSeat`, the seat map | 3 | a show creates the right number of seats; overlapping shows are refused |
-| 5 | Seat holds (Lua), orders, `IdempotencyKey`, `OutboxEvent` rows | 4, 5, 6, 8 | `autocannon` demo: exactly 1 winner; the same create-order request twice gives one order |
-| 6 | `Payment`, `PaymentEvent`, `confirmPayment` transaction, **worker process**: outbox publisher, ticket worker, email worker, order expiry | 7, 15, 16, 17 | a paid order gets tickets and an email; stop the worker, pay, start it: the tickets still appear; an unpaid order expires by itself |
-| 7 | Coupons (`CouponRedemption`), offers, recommendations (`UserMovieSignal`) | 5 | a coupon with 1 use works for exactly one user; expiry gives the coupon back |
-| 8 | Redis caching for movie details, rate limiting | 9, 10 | second movie request is cached; login gets 429 after 5 tries |
-| 9 | Email verification, password reset, Google login (`EmailToken`, `OAuthAccount`) | 1 | unverified users cannot book; emails go through the queue |
-| 10 | Bloom filter, write-behind view counts (`ProcessedBatch`) | 11, 12, 14 | random ids never reach MongoDB; 100 views make 1 database write |
-| 11 | Refunds and show cancellation (`Refund`), retries and failed jobs | 16 | cancelling a show refunds every order; a failing job retries and then shows as failed |
-| 12 | 3 API copies and 2 workers behind nginx, optional Razorpay test webhook | 13, 15 | kill one API copy and requests still succeed; each job is processed once with 2 workers |
+| POST /api/auth/register | public | `createUser` | validate, lowercase the email, bcrypt the password, create the user (`USER`, `ACTIVE`, not verified); 409 if the email exists |
+| POST /api/auth/login | public | `loginUser` | check the password (same 401 for unknown email and wrong password); suspended users get 403; set `lastLoginAt`; return the access token and set the refresh cookie |
+| POST /api/auth/refresh | refresh cookie | `refresh` | new access token if the cookie is valid, the user is `ACTIVE` and `tokenVersion` matches |
+| POST /api/auth/logout | logged in | `logout` | add 1 to `tokenVersion`, clear the cookie |
+| GET /api/auth/me | logged in | `fetchUser` | the current user, without `passwordHash` or `tokenVersion` |
+| PATCH /api/me | logged in | `updateMyProfile` | change my `name` (nothing else can be changed here) |
+| POST /api/me/change-password | logged in | `changeMyPassword` | needs the current password; new password 8 to 72 characters; add 1 to `tokenVersion` and give back fresh tokens |
+| GET /api/admin/users | admin | `listUsers` | search by name or email, filter by `role` and `status`, paged |
+| GET /api/admin/users/:id | admin | `getUserById` | one user (no password hash) |
+| PATCH /api/admin/users/:id | admin | `updateUser` | change `role` (this is how someone becomes a `MANAGER`) or `status`; suspending adds 1 to `tokenVersion`; an admin cannot change their own role or status |
 
-### Frontend (after the backend)
+**Rules to implement:**
+- **Register:** name 2 to 60 characters, a valid email (lowercased and trimmed), password 8 to 72 characters. Hash with `bcryptjs`. A duplicate email gives 409 `Email already registered` (catch the MongoDB duplicate-key error, code 11000). The new user is always `USER`, `ACTIVE`, `emailVerified: false`; the role is never taken from the request.
+- **Login:** same 401 message for an unknown email and a wrong password. A `SUSPENDED` user gets 403. Set `lastLoginAt`. Access token lasts 15 minutes and carries `userId`, `role` and `tokenVersion`. The refresh token (7 days) goes in an httpOnly cookie: `sameSite: 'lax'`, `secure` only in production, `path: '/api/auth'`.
+- **Refresh:** the user must still exist, be `ACTIVE`, and the token's `tokenVersion` must equal the user's.
+- **Logout:** add 1 to `tokenVersion` (this ends every refresh token) and clear the cookie. Say in your notes that an access token still works until it expires (at most 15 minutes).
+- **`PATCH /me`:** only `name`. **Change password:** needs the current password; add 1 to `tokenVersion`; return fresh tokens.
+- **Admin users:** list with a search box (name or email), filters `role` and `status`, paging (`limit` capped at 100). `PATCH` accepts only `role` and `status`. An admin cannot change their own role or status (400). Setting `SUSPENDED` also adds 1 to `tokenVersion`.
+- Never return `passwordHash`, `tokenVersion` or the verify-token fields in any response.
 
-| Week | Build |
-|---|---|
-| 13 | Vite setup, `AuthContext`, login and register, home page, movie detail |
-| 14 | Reviews, search, showtimes |
-| 15 | Seat map, hold timer, checkout, tickets |
-| 16 | Loading, empty and error states, phone layout, README, short demo video |
+**Check by hand:**
+- Register the same email twice (second time with capital letters): 409, one document in MongoDB.
+- Register with a 5-character password, a bad email, a missing name: 400 each, with a clear message.
+- Login with a wrong password and with an unknown email: the same 401 message.
+- Call `/auth/me` with no token, a garbage token and a good token: 401, 401, 200.
+- Log out, then refresh: 401. Log in again: works.
+- Suspend a user as admin: that user cannot log in; their old refresh token stops working.
+- A `USER` token on `GET /admin/users`: 403. An admin changing their own role: 400.
 
-**If you run short on time, cut in this order:** the Razorpay part of week 12, Google login, recommendations, week 11 (keep show cancellation only), the Bloom filter.
+**Concepts:** 1 (authentication), 2 (authorization)
+
+**Done when:** you can do the whole flow from Postman, and every write is confirmed in `mongosh`.
+
+### Week 2: Movies, people and the catalog
+
+**Goal:** the public can browse and search movies; the admin can manage the catalog (full create, read, update, delete).
+
+**Models to add:** `Movie`, `Person`.
+
+**Files to write:** `models/Movie.ts`, `Person.ts`; `controllers/movieController.ts` (3 of 4), `personController.ts`, `adminCatalogController.ts` (all 8); `scripts/seed.ts` (users, people, movies).
+
+**Routes to build this week** (they already exist as stubs; replace each stub with the real handler):
+
+| Method and path | Who | Handler | What it does |
+|---|---|---|---|
+| GET /api/movies | public | `getMovieList` | filters `genre`, `language`, `status`; `sort`; `page`, `limit` |
+| GET /api/movies/search?q= | public | `searchMovies` | MongoDB text search (this route is above `/:id` on purpose) |
+| GET /api/movies/:id | public | `getMovie` | Bloom filter (Week 10), cache (Week 8), then MongoDB; counts a view (Week 10) |
+| GET /api/people/:id | public | `getPersonById` | bio and the movies this person worked on |
+| POST /api/admin/people | admin | `createPerson` | name required; bio, photo and birth date optional |
+| GET /api/admin/people | admin | `listPeople` | search by name, paged |
+| PATCH /api/admin/people/:id | admin | `updatePerson` | if the name changes, update the copies in `Movie.cast` and `Movie.crew` |
+| DELETE /api/admin/people/:id | admin | `deletePerson` | refused (409) while the person is in any movie |
+| POST /api/admin/movies | admin | `createMovie` | validate; add the id to the Bloom filter first (Week 10); then save |
+| PATCH /api/admin/movies/:id | admin | `updateMovie` | change any field except ratings and `viewCount`; delete the cache entry (Week 8) |
+| DELETE /api/admin/movies/:id | admin | `deleteMovie` | refused while the movie has shows: set `status: ENDED` instead; otherwise delete it with its reviews and watchlist rows |
+| PUT /api/admin/movies/:id/cast | admin | `setMovieCast` | replace `cast` and `crew`; copy each person's name; at most 50 and 20 |
+
+**Rules to implement:**
+- **List movies:** filters `genre` (must be in the genre list), `language`, `status`; `sort` by `releaseDate`, `ratingAvg` or `title`; `page` at least 1, `limit` 1 to 100 (default 20). Return `{ movies, page, limit, total }`.
+- **Search:** `q` required, 1 to 100 characters; MongoDB `$text`, best match first. The route is declared above `/:id`.
+- **Detail:** invalid id gives 400, unknown id gives 404. Return `ratingAvg` as stored (0 when there are no ratings).
+- **Create movie:** title 1 to 200, `runtimeMin` at least 1, `language`, `releaseDate` required; at most 6 genres, all from `utils/genres.ts`; ratings and `viewCount` start at 0 and cannot be set by the client.
+- **Update movie:** any field except `ratingSum`, `ratingCount`, `ratingAvg`, `viewCount`.
+- **Set cast (`PUT .../cast`):** replace the whole `cast` and `crew` arrays; each `personId` must exist; copy the person's `name` into the entry; at most 50 cast and 20 crew; give each cast entry a `billingOrder`.
+- **Delete movie:** if it has shows, refuse with 409 and tell the admin to set `status: ENDED`. Otherwise delete the movie and its reviews and watchlist rows.
+- **People:** create needs a name. List supports a name search. Update: when `name` changes, update every copy in `Movie.cast.name` and `Movie.crew.name` (`updateMany` with the positional operator). Delete is refused (409) while the person appears in any movie.
+- **Person page:** the bio plus the movies found through `cast.personId` and `crew.personId`.
+- **Seed:** 1 admin, 2 managers, 2 users (all verified), about 20 people, 12 movies across several genres with 4 to 6 cast each.
+
+**Check by hand:**
+- Create a movie with 7 genres, an unknown genre, a missing title: 400 each.
+- Search a title word and an actor's name: both find the movie.
+- `limit=1000` returns at most 100 items; `page=0` gives 400.
+- In `mongosh`: `db.movies.find({ genres: "Action" }).explain("executionStats")` shows an index scan (`IXSCAN`).
+- Rename a person: every movie's cast entry shows the new name.
+- Delete a person who is in a movie: 409. Delete a person who is not: 200.
+- A `USER` token on `POST /admin/movies`: 403.
+
+**Concepts:** 3 (indexes and pagination)
+
+**Done when:** a stranger can browse and search, the admin can create, edit and delete every catalog item, and the rules above hold.
+
+### Week 3: Reviews, votes, reports and the watchlist
+
+**Goal:** logged-in users can review movies, vote and report; the admin can moderate.
+
+**Models to add:** `Review`, `ReviewVote`, `ReviewReport`, `Watchlist`.
+
+**Files to write:** `models/Review.ts`, `ReviewVote.ts`, `ReviewReport.ts`, `Watchlist.ts`; `controllers/reviewController.ts` (all 5), `watchlistController.ts` (all 4), `adminReviewController.ts` (all 3).
+
+**Routes to build this week** (they already exist as stubs; replace each stub with the real handler):
+
+| Method and path | Who | Handler | What it does |
+|---|---|---|---|
+| GET /api/movies/:id/reviews | public | `listReviews` | `VISIBLE` reviews; `sort` by recent, helpful or rating; paged |
+| PUT /api/movies/:id/reviews/me | verified user | `saveMyReview` | create or update my review; adjust the rating totals; `verifiedViewer` from my orders (Week 6) |
+| DELETE /api/movies/:id/reviews/me | logged in | `deleteMyReview` | delete it and take it out of the totals |
+| POST /api/reviews/:id/helpful | verified user | `voteReviewHelpful` | toggle my vote; `helpfulCount` changes only if the vote row changed |
+| POST /api/reviews/:id/report | verified user | `reportReview` | one report per user per review; `reportCount` goes up by 1 |
+| GET /api/watchlist | logged in | `getWatchlist` | my watchlist, newest first |
+| POST /api/watchlist | logged in | `addToWatchlist` | body `{ movieId }`; adding twice does nothing; records a `WATCHLIST` signal (Week 7) |
+| GET /api/watchlist/:movieId/status | logged in | `checkWatchlistStatus` | returns `{ inWatchlist: true or false }` |
+| DELETE /api/watchlist/:movieId | logged in | `removeFromWatchlist` | 404 if it was not there |
+| GET /api/admin/reviews/reported | admin | `listReportedReviews` | reviews with `reportCount` above 0, most reported first |
+| PATCH /api/admin/reviews/:id | admin | `moderateReview` | set `status` to `HIDDEN` or `VISIBLE`; mark its reports `RESOLVED` |
+| DELETE /api/admin/reviews/:id | admin | `deleteReview` | delete it and take it out of the rating totals |
+
+**Rules to implement:**
+- **Save my review (`PUT`):** rating is a whole number 1 to 10; `title` up to 100 and `body` up to 2000 characters, treated as plain text; `userName` is copied from the user. It is an upsert on `(movieId, userId)`.
+- **Rating totals** are changed with one atomic update, never read-then-save: on a new review `$inc ratingSum` by the rating and `ratingCount` by 1; on a changed review `$inc ratingSum` by the difference. Then recompute `ratingAvg` in the same update (pipeline update, see database design 5.5). Deleting a review does the opposite.
+- `verifiedViewer` stays `false` for now; Week 6 fills it in.
+- **Helpful vote:** a toggle. Insert the `ReviewVote`; if it already exists, delete it. Change `helpfulCount` with `$inc` only when the vote row really changed.
+- **Report:** one per user per review (the unique index gives a clear 409); `reportCount` goes up by 1. A user cannot report their own review.
+- **Admin moderation:** the reported list shows reviews with `reportCount` above 0, most reported first. `PATCH` sets `HIDDEN` or `VISIBLE` and marks the open reports `RESOLVED`. A hidden review leaves the public list but still counts in the totals unless the admin deletes it. Admin `DELETE` removes it and fixes the totals.
+- **Watchlist:** add is an upsert (adding twice is not an error); status returns `{ inWatchlist: true or false }` (a boolean, not an array); remove returns 404 if nothing was deleted (`deletedCount === 0`).
+- `requireVerified` guards writing a review, voting and reporting (so before Week 9 use a verified test account).
+
+**Check by hand:**
+- Post a review, then post again for the same movie: updated, not duplicated; `ratingSum` and `ratingCount` correct in `mongosh`.
+- Rating 0, 11 and 5.5, and a 5,000-character body: 400 each.
+- Two users review at once: both counted; `ratingAvg` equals `ratingSum / ratingCount`.
+- Delete a review: the totals go back.
+- Vote twice: the second removes the vote; `helpfulCount` matches the number of `reviewvotes` rows.
+- Report your own review: 400. Report twice: 409.
+- Admin hides a review: it disappears from `GET /movies/:id/reviews`.
+- Watchlist: add twice (one row), status true, remove, remove again (404), status false.
+
+**Concepts:** 5 (atomic updates with `$inc`)
+
+**Done when:** totals always match the reviews, one review per user per movie, and moderation works.
+
+### Week 4: Theatres, screens, shows and the seat map
+
+**Goal:** admins and managers can set up theatres, screens and shows (full create, read, update, delete); the public can see showtimes and a seat map.
+
+**Models to add:** `Theatre`, `Screen`, `Show`, `ShowSeat`.
+
+**Files to write:** `models/Theatre.ts`, `Screen.ts`, `Show.ts`, `ShowSeat.ts`; `controllers/adminVenueController.ts` (all 13), `showController.ts` (3 of 4); `services/holdService.ts` is already there (used by the seat map).
+
+**Routes to build this week** (they already exist as stubs; replace each stub with the real handler):
+
+| Method and path | Who | Handler | What it does |
+|---|---|---|---|
+| GET /api/movies/:id/shows?city=&date= | public | `listShowsForMovie` | showtimes grouped by theatre |
+| GET /api/shows/:id | public | `getShow` | the show with movie, theatre and price tiers |
+| GET /api/shows/:id/seats | public | `getShowSeats` | sold seats from MongoDB, held seats from Redis (`getHeldSeatIds`) |
+| POST /api/admin/theatres | admin or manager | `createTheatre` | a manager can only create theatres that they manage; an admin names the manager |
+| GET /api/admin/theatres | admin or manager | `listTheatres` | an admin sees all, a manager sees their own |
+| GET /api/admin/theatres/:id | admin or manager | `getTheatre` | one theatre (managers: only their own) |
+| PATCH /api/admin/theatres/:id | admin or manager | `updateTheatre` | name, city, address; only an admin can change `managerId` |
+| DELETE /api/admin/theatres/:id | admin or manager | `deleteTheatre` | refused (409) while the theatre has any show |
+| POST /api/admin/theatres/:id/screens | admin or manager | `createScreen` | 1 to 20 sections; `totalSeats` is calculated |
+| GET /api/admin/theatres/:id/screens | admin or manager | `listScreens` | the screens of one theatre |
+| PATCH /api/admin/screens/:id | admin or manager | `updateScreen` | the name any time; the layout only while the screen has no shows |
+| DELETE /api/admin/screens/:id | admin or manager | `deleteScreen` | refused (409) while the screen has any show |
+| POST /api/admin/shows | admin or manager | `createShow` | one transaction: bump the screen's `showWriteVersion`, check for overlap, create the show and one `ShowSeat` per seat |
+| GET /api/admin/shows | admin or manager | `listShows` | filter by theatre, movie, date and status; managers see only their theatres |
+| PATCH /api/admin/shows/:id | admin or manager | `updateShow` | price tiers and `highDemand`, only while no seat is sold |
+| POST /api/admin/shows/:id/cancel | admin or manager | `cancelShow` | Week 4: only if no order is paid. Week 11: refunds every paid order |
+
+**Rules to implement:**
+- **Manager scope:** a `MANAGER` only sees and changes theatres where `managerId` is their own id; an `ADMIN` can do everything. Check this in every theatre, screen and show handler.
+- **Theatre:** create (a manager is automatically the manager; an admin supplies `managerId`, who must have role `MANAGER`), list, get, update (only an admin may change `managerId`), delete (409 while the theatre has any show).
+- **Screen:** 1 to 20 sections; each has `rows` 1 to 26, `seatsPerRow` 1 to 40 and a `tier`. `totalSeats` is calculated by the model. Update: the name any time, the layout only while the screen has no shows. Delete: 409 while it has shows.
+- **Create show (one transaction):** (1) bump `Screen.showWriteVersion` with `$inc`, so two managers creating shows at the same moment clash; (2) check overlap: another show on the same `screenId`, not `CANCELLED`, with `startsAt < newEnd` and `endsAt > newStart` gives 409 `SHOW_OVERLAP`; (3) insert the show: `endsAt` = `startsAt` + the movie's runtime + a 15 minute cleaning buffer, `seatCounts.total` from the screen, a price for every `tier` in the layout; (4) insert one `ShowSeat` per seat: rows lettered A, B, C..., `seatLabel` like `A-5`, the tier and price of its section, `expireAt` = `endsAt` + 90 days. `startsAt` must be in the future and the movie must exist.
+- **List shows (staff):** filter by theatre, movie, date and status.
+- **Update show:** only `priceTiers` and `highDemand`, and only while `seatCounts.sold` is 0. Changing prices also updates the unsold `ShowSeat` prices.
+- **Cancel show (Week 4 version):** allowed only if no order is paid; set `status: CANCELLED`. The refund version comes in Week 11.
+- **Public:** showtimes for a movie by `city` and `date`, grouped by theatre and sorted by time, only `SCHEDULED` or `ON_SALE` shows that have not started. `GET /shows/:id` returns the show with the movie and theatre names. **Seat map:** all seats of the show from MongoDB, then mark the ones that are held in Redis using `getHeldSeatIds`; return `AVAILABLE`, `HELD` or `SOLD` per seat.
+
+**Check by hand:**
+- As a manager create a theatre, a screen and a show: the show has exactly `totalSeats` `ShowSeat` documents; the labels are unique.
+- Create a second show on the same screen at an overlapping time: 409. Do it from two terminals at once: only one succeeds.
+- A manager editing another manager's theatre: 403 or 404. An admin can.
+- Delete a theatre that has a show: 409. Cancel a show with no paid orders: works.
+- Seat map of a show: every seat `AVAILABLE`. Hold a seat in Redis by hand (`redis-cli SET hold:<showId>:<seatId> test EX 60`): it shows as `HELD`.
+- Check the indexes: `db.showseats.getIndexes()`; try inserting a duplicate seat in `mongosh`: refused.
+
+**Concepts:** 3 (indexes), 7 (transaction, first use)
+
+**Done when:** the seed script can create theatres, screens and shows through the same code, and the seat map is correct.
+
+### Week 5: Seat holds, orders and idempotency
+
+**Goal:** a user can hold seats and create an order; a double click never creates two orders.
+
+**Models to add:** `Order`, `IdempotencyKey`, `OutboxEvent`.
+
+**Files to write:** `models/Order.ts`, `IdempotencyKey.ts`, `OutboxEvent.ts`; `controllers/holdController.ts`, `orderController.ts` (create, list, get, cancel), `adminOrderController.ts` (2 of 5); `services/holdService.ts`, `idempotencyService.ts`, `outboxService.ts` (already in the reference); a `services/pricingService.ts` you write.
+
+**Routes to build this week** (they already exist as stubs; replace each stub with the real handler):
+
+| Method and path | Who | Handler | What it does |
+|---|---|---|---|
+| POST /api/holds | verified user | `holdSeats` | body `{ showId, seatIds }`; the seats must exist, be `AVAILABLE` and belong to a show that has not started; then `tryHold` |
+| DELETE /api/holds/:holdId | logged in | `releaseHold` | `releaseHoldById` for my own hold |
+| POST /api/orders | verified user | `createOrder` | body `{ holdId }` plus header `Idempotency-Key`; creates `PENDING_PAYMENT`, extends the hold, saves `order.created` |
+| GET /api/orders | logged in | `listMyOrders` | my orders, newest first, paged |
+| GET /api/orders/:id | logged in | `getOrder` | only my own order |
+| POST /api/orders/:id/cancel | logged in | `cancelOrder` | only my own `PENDING_PAYMENT` order; releases the hold and the coupon |
+| GET /api/admin/orders | admin | `listOrders` | filter by status, date, user and show; paged |
+| GET /api/admin/orders/:id | admin | `getOrderDetails` | the order with its history, payment, tickets and refund |
+
+**Rules to implement:**
+- **Hold seats:** `seatIds` 1 to 6, distinct, all valid ids. Load them from MongoDB: they must belong to `showId`, be `AVAILABLE`, and the show must be `SCHEDULED` or `ON_SALE` and not started (otherwise 409 `SEAT_UNAVAILABLE` or 400). Then call `tryHold`. If it returns `held: false`, answer 409 `SEAT_UNAVAILABLE`. Success: 201 `{ holdId, expiresAt }`. The user's earlier hold on the same show is replaced.
+- **Release hold:** `releaseHoldById(holdId, userId)`; if it returns false answer 404.
+- **Create order:** requires the `Idempotency-Key` header (8 to 64 characters). Run `startIdempotent` first (reference, section 4): a finished duplicate returns the saved response, a different body with the same key gives 422, a still-running duplicate gives 409. Then: the hold must exist (`getHold`), belong to this user, and cover the seats in the body; otherwise 410 `HOLD_EXPIRED`.
+- **Pricing (`pricingService`):** read every seat's price from MongoDB (never from the client). `subtotalMinor` = sum of seat prices; `feeMinor` = `feePerSeatMinor` times the seat count; `discountMinor` = 0 (coupons come in Week 7); `totalMinor` = subtotal + fee - discount, never below 0. Copy `movieTitle`, `theatreName`, `screenName`, `startsAt` and the seat labels into the order (`snapshot` and `items`).
+- **Order fields:** `status: PENDING_PAYMENT`, `expiresAt` = now + `paymentWindowSeconds`, `holdId`, a first `history` entry. Call `extendHold`. Save an `order.created` outbox row with `{ orderId, expiresAt }` (it waits in MongoDB until the worker exists in Week 6). Finish with `finishIdempotent`.
+- **Cancel order:** only the owner, only while `PENDING_PAYMENT`, with a conditional update to `CANCELLED`; then `releaseHoldById`. Anything else gives 409.
+- **List and get orders:** the user sees only their own (404, not 403, for someone else's id). Admin: list with filters (status, date range, user id, show id) and paging; details include the history.
+
+**Check by hand:**
+- Run the race demo (plan section 9) with several different user tokens on one seat: exactly one 201, the rest 409.
+- Hold 7 seats: 400. Hold a seat that is already `SOLD` (set one by hand): 409. Hold a seat of another show: 400.
+- Hold the same seats again as the same user: it replaces the old hold (one `userHold` key).
+- Create an order twice with the same `Idempotency-Key`: the same order comes back; one document. Same key, different seats: 422.
+- After creating an order: `redis-cli TTL hold:<show>:<seat>` is about 600; MongoDB still says the seats are `AVAILABLE`; `db.outboxevents` has an unpublished `order.created` row.
+- Create an order from an expired or someone else's hold: 410 or 403. Cancel it: status `CANCELLED`, the Redis keys are gone. Cancel it again: 409.
+- Check the total by hand: seat prices + fee.
+
+**Concepts:** 4 (race condition), 5 (atomic update), 6 (Redis TTL), 8 (idempotency)
+
+**Done when:** the race demo gives one winner every run, duplicate order requests give one order, and the numbers add up.
+
+### Week 6: Payment, the confirm transaction, the worker, tickets and scanning
+
+**Goal:** a paid order gets tickets and an email, even if the worker was down when the user paid.
+
+**Models to add:** `Payment`, `PaymentEvent`, `Ticket`.
+
+**Files to write:** `models/Payment.ts`, `PaymentEvent.ts`, `Ticket.ts`; `services/orderService.ts` (already in the reference); **the whole worker process**: `queues/queues.ts`, `queues/outboxRoutes.ts`, `workers/workerMain.ts`, `outboxPublisher.ts`, `emailWorker.ts`, `orderWorker.ts`, `clients/emailClient.ts`; `controllers/orderController.ts` (pay, tickets), `showController.ts` (scan).
+
+**Routes to build this week** (they already exist as stubs; replace each stub with the real handler):
+
+| Method and path | Who | Handler | What it does |
+|---|---|---|---|
+| POST /api/shows/:id/scan | admin or manager | `scanTicket` | one atomic update sets `usedAt` and `usedByUserId`; a second scan is refused |
+| POST /api/orders/:id/pay | logged in | `payOrder` | create the `Payment`; with the fake provider call `confirmPayment` straight away |
+| GET /api/orders/:id/tickets | logged in | `listOrderTickets` | tickets with a QR code made from `ticketCode` |
+
+**Rules to implement:**
+- **Pay (fake provider):** only the owner, only a `PENDING_PAYMENT` order that has not passed `expiresAt`. Create a `Payment` (`provider: FAKE`, `providerOrderId: fake_<random>`, `amountMinor` = the order total, `CREATED`). Then call `confirmPayment(orderId, providerPaymentId)`. Results: `PAID` gives 200; `ALREADY_HANDLED` gives 200 with the order as it is now; `SEATS_TAKEN` calls `refundBecauseSeatsTaken` and answers 409 `SEATS_TAKEN`.
+- **`confirmPayment` is one transaction** (reference, section 4): order `PAID`, seats `SOLD`, payment `SUCCEEDED`, coupon `COMMITTED`, `seatCounts.sold`, `order.paid` outbox row. Read it line by line and be able to explain it.
+- **Worker process** (`npm run worker`): the outbox publisher moves unpublished rows into BullMQ every 2 seconds; `createTickets` upserts one ticket per seat (unique `(orderId, showSeatId)`), makes the order `CONFIRMED`, and queues one email; `expireOrder` (delayed job from `order.created`) expires an unpaid order and gives back its hold; `sweepOrders` runs every 60 seconds as a safety net. Every handler must be safe to run twice.
+- **Email:** with no `SMTP_HOST` the email is printed in the worker terminal (that is fine for development).
+- **Tickets for the user:** `GET /orders/:id/tickets` returns each ticket with a QR image (`qrcode.toDataURL(ticketCode)`) and the seat label; only for the owner, only for `PAID` or `CONFIRMED` orders.
+- **Scan (`POST /shows/:id/scan`, admin or manager):** body `{ ticketCode }`; one atomic `findOneAndUpdate({ ticketCode, showId, usedAt: null, cancelledAt: null }, { usedAt: now, usedByUserId })`. `null` means refused: say whether it was already used or unknown. A manager can only scan shows of their theatres.
+- **`verifiedViewer`:** now update `saveMyReview` so it is `true` when the user has a `CONFIRMED` order for a show of that movie that has already started.
+
+**Check by hand:**
+- Create an order, pay: order `PAID` then `CONFIRMED`; `showseats` are `SOLD`; two tickets; the email is printed in the worker terminal; the outbox rows are `published: true`.
+- Pay the same order twice: the second changes nothing (still one payment `SUCCEEDED`, two tickets).
+- **Stop the worker**, create and pay an order: it is `PAID`, no tickets, the outbox row waits with `published: false`. Start the worker: the tickets appear.
+- Let an unpaid order pass `expiresAt`: the worker expires it and the Redis keys disappear.
+- Two users hold overlapping seats after the first hold expired and both pay: exactly one gets the seats; the other gets 409, and has a `REFUND_PENDING` order and a `Refund` row.
+- Scan a ticket twice: the second is refused. Scan a made-up code: refused.
+- Run two workers: still one set of tickets and one email per order.
+
+**Concepts:** 5, 7 (transaction), 15 (idempotent payment), 16 (queue), 17 (outbox)
+
+**Done when:** the booking flow works end to end from Postman, and the queue survives the worker being down.
+
+### Week 7: Coupons, offers and recommendations
+
+**Goal:** users can apply coupons and see offers; the admin can run coupons and offers (full CRUD); the home page can recommend movies.
+
+**Models to add:** `Coupon`, `CouponRedemption`, `Offer`, `UserMovieSignal`.
+
+**Files to write:** `models/Coupon.ts`, `CouponRedemption.ts`, `Offer.ts`, `UserMovieSignal.ts`; `controllers/orderController.ts` (coupon apply and remove), `couponController.ts`, `adminPromoController.ts` (all 9), `movieController.ts` (similar), `recommendationController.ts`; `services/couponService.ts`, `recommendationService.ts` you write.
+
+**Routes to build this week** (they already exist as stubs; replace each stub with the real handler):
+
+| Method and path | Who | Handler | What it does |
+|---|---|---|---|
+| GET /api/me/recommendations | logged in | `getMyRecommendations` | genres from my `UserMovieSignal` rows, weighted; falls back to top rated |
+| GET /api/movies/:id/similar | public | `getSimilarMovies` | movies that share genres, best rated first |
+| POST /api/orders/:id/coupon | logged in | `applyCoupon` | atomic claim of one use, a `RESERVED` redemption, recalculate the total |
+| DELETE /api/orders/:id/coupon | logged in | `removeCoupon` | release the redemption and give the use back |
+| GET /api/offers | public | `listOffers` | enabled offers in their date range, with the coupon code |
+| POST /api/admin/coupons | admin | `createCoupon` | validate dates and value; add the code to the Bloom filter first (Week 10) |
+| GET /api/admin/coupons | admin | `listCoupons` | filter by `enabled`, paged |
+| GET /api/admin/coupons/:id | admin | `getCoupon` | one coupon with `usedCount` |
+| PATCH /api/admin/coupons/:id | admin | `updateCoupon` | enable or disable, change dates, limits and rules; the `code` cannot change |
+| DELETE /api/admin/coupons/:id | admin | `deleteCoupon` | refused (409) if it was ever redeemed: disable it instead |
+| POST /api/admin/offers | admin | `createOffer` | title, dates, optional coupon |
+| GET /api/admin/offers | admin | `listAllOffers` | all offers, including disabled ones |
+| PATCH /api/admin/offers/:id | admin | `updateOffer` | change or disable it |
+| DELETE /api/admin/offers/:id | admin | `deleteOffer` | delete it |
+
+**Rules to implement:**
+- **Coupon fields on create:** `code` (uppercased, 1 to 30 characters), `type` `PERCENT` (value 1 to 100) or `FLAT` (value in paise), `validFrom` before `validTo`, `maxTotalUses` (or none), optional `maxDiscountMinor`, `minOrderMinor`, `firstBookingOnly` and `rules` (movies, theatres, days of the week, tiers). The `code` cannot change later.
+- **Apply coupon** (only to your own `PENDING_PAYMENT` order, one coupon per order): the coupon exists and is `enabled`; today is inside the dates; the order subtotal is at least `minOrderMinor`; the movie, theatre, day and tier rules match; if `firstBookingOnly`, the user has no `CONFIRMED` order. Unknown, disabled, expired and wrong-rule coupons all give the same 422 `COUPON_INVALID` message (so nobody can probe for codes).
+- **Atomic claim:** `findOneAndUpdate` on the coupon with `enabled: true` and `$expr: { $lt: ['$usedCount', '$maxTotalUses'] }` (skip this condition when there is no limit) and `$inc: { usedCount: 1 }`. A `null` result means no uses are left. Then insert the `CouponRedemption` (`RESERVED`, `isActive: true`); a duplicate-key error means this user already has an active use: undo the `$inc` and answer 422.
+- **Discount:** `PERCENT`: subtotal times value / 100, capped by `maxDiscountMinor`; `FLAT`: the value. Never more than subtotal + fee. Save `discountMinor`, `couponId`, `couponCode` and the new `totalMinor` on the order. Applying a second coupon replaces the first (release the old one).
+- **Remove coupon, cancel and expiry:** set the redemption `RELEASED` with `isActive: false` and `$inc usedCount: -1`. Pay already commits it (inside `confirmPayment`).
+- **Admin coupons:** list (filter `enabled`, paged), get (shows `usedCount`), update (enable or disable, dates, limits, rules), delete (409 if it was ever redeemed: disable it instead). **Offers:** create, list all (admin), list active (public, with the coupon code), update, delete.
+- **Signals:** write a `UserMovieSignal` (unique `signalId`, so repeats are harmless) for `VIEW` (weight 1), `WATCHLIST` (3), `BOOKED` (5, when an order is confirmed), `RATED_HIGH` (4, rating 8 to 10) and `RATED_LOW` (-3, rating 1 to 4). Write them without making the request wait on them (ignore failures).
+- **Similar movies:** movies sharing at least one genre, scored by the number of shared genres then `ratingAvg`, excluding the movie itself, top 10.
+- **Recommendations:** add up the weights of the user's signals from the last 180 days per genre; take the best 3 genres; return the best-rated movies in those genres that the user has not booked; if the user has no signals, return top rated overall.
+
+**Check by hand:**
+- Apply a valid coupon: discount and total correct by hand; `usedCount` is 1; redemption `RESERVED`.
+- Apply an unknown code, a disabled one, an expired one, one below the minimum order: the same 422 message every time.
+- Apply, then remove: `usedCount` back to 0, redemption `RELEASED`. Apply two different coupons: only the second is active.
+- Pay: redemption `COMMITTED`. Let another order with a coupon expire: the use comes back.
+- The same user applies the same coupon on a second order while the first is active: 422.
+- A coupon with `maxTotalUses: 1`: run the apply request from two users at once (two terminals or `autocannon` with two tokens): exactly one succeeds.
+- `db.couponredemptions.getIndexes()` shows the partial unique index; inserting two active redemptions for one user and coupon by hand is refused.
+- Delete a coupon that was used: 409. Recommendations change after you book or rate movies of one genre.
+
+**Concepts:** 5 (atomic coupon claim)
+
+**Done when:** a coupon with 1 use works for exactly one user, expiry gives it back, and the admin can fully manage coupons and offers.
+
+### Week 8: Caching, rate limiting and the dashboard numbers
+
+**Goal:** the site is faster for repeated reads and protected from abuse.
+
+**Models to add:** none.
+
+**Files to write:** `cache/movieCache.ts` (already there); changes to `movieController.ts`, `adminCatalogController.ts`; `adminOrderController.ts` (`getStats`).
+
+**Routes to build this week** (they already exist as stubs; replace each stub with the real handler):
+
+| Method and path | Who | Handler | What it does |
+|---|---|---|---|
+| GET /api/admin/stats | admin | `getStats` | counts of users, movies, shows today, orders by status, and revenue; cached for 60 seconds |
+
+**Rules to implement:**
+- **Cache-aside on `GET /movies/:id`:** call `getCachedMovie`; on a miss read MongoDB, build the response and `setCachedMovie` (60 seconds). `updateMovie`, `setMovieCast`, `deleteMovie` and a new review call `deleteCachedMovie`. View counts may be up to 60 seconds old; say so in your notes. Cache the `similar` list for 1 hour.
+- **Rate limits:** they are already attached in the route files (section 10 shows each). This week you check that each one works, that the numbers are sensible, and that the `fail closed` routes (login, register, password, coupons) answer 503 when Redis is down while browsing keeps working.
+- **`GET /admin/stats`:** one response with the number of users by role, movies, shows today, orders by status, and revenue (sum of `totalMinor` for `PAID` and `CONFIRMED` orders) for today and for the last 7 days. Use `Order.aggregate` with `$match` and `$group`. Cache the result in Redis for 60 seconds.
+
+**Check by hand:**
+- Open the same movie twice: the second is served from Redis (`redis-cli GET movie:<id>`, `TTL`); the response is faster.
+- Edit the movie as admin, open it again: the new data (the cache entry was deleted).
+- Login 6 times in a minute: the 6th is 429 with `Retry-After`; wait and it works again. Use `autocannon` with `-a 10`.
+- Stop Redis (`docker compose stop redis`): login answers 503 quickly, movie pages still load from MongoDB; start Redis and everything recovers.
+- The stats numbers match `mongosh` counts. Call stats twice: the second is cached.
+
+**Concepts:** 9 (caching), 10 (rate limiting)
+
+**Done when:** repeated movie reads hit Redis, the rate limits trigger, and Redis going down does not break browsing.
+
+### Week 9: Email verification, password reset and Google login
+
+**Goal:** new accounts must prove their email; users can reset a forgotten password; people can sign in with Google.
+
+**Models to add:** `EmailToken`, `OAuthAccount`.
+
+**Files to write:** `models/EmailToken.ts`, `OAuthAccount.ts`; `controllers/authController.ts` (the five remaining handlers); `utils/tokens.ts` has `randomToken` and `hashToken`; `clients/googleClient.ts` you write.
+
+**Routes to build this week** (they already exist as stubs; replace each stub with the real handler):
+
+| Method and path | Who | Handler | What it does |
+|---|---|---|---|
+| POST /api/auth/verify-email | public | `verifyEmail` | hash the token, find it, check expiry and `usedAt`, mark the user verified |
+| POST /api/auth/resend-verification | public | `resendVerification` | same answer whether or not the email exists |
+| POST /api/auth/forgot-password | public | `forgotPassword` | create a `RESET` token and queue the email; same answer either way |
+| POST /api/auth/reset-password | public | `resetPassword` | check the token, set the new hash, add 1 to `tokenVersion` |
+| POST /api/auth/google | public | `googleLogin` | check the Google ID token; find the user by Google `sub` in `OAuthAccount`, or link or create one |
+
+**Rules to implement:**
+- **Verification email:** register creates a `VERIFY` token: 32 random bytes, only the SHA-256 hash is saved, expires in 24 hours. Save an `email.send` outbox row with the link `CLIENT_URL/verify-email?token=...`; the worker sends it (printed in the worker terminal in development). Invalidate older unused `VERIFY` tokens when a new one is issued.
+- **Verify:** the frontend page calls `POST /verify-email` with the token (a link that changes data on GET can be triggered by mail scanners). Hash it, find it, check not expired and `usedAt` is null; set `usedAt` and `emailVerified: true`. Used or expired: 400 with a clear message.
+- **Resend and forgot password** always return the same message whether or not the email exists (no account enumeration), and are rate limited.
+- **Reset:** a `RESET` token that expires in 30 minutes; `POST /reset-password` checks it, sets the new password (8 to 72 characters), marks the token used and adds 1 to `tokenVersion` (this logs the user out everywhere).
+- **Google login:** the frontend gets a Google ID token and sends it to `POST /auth/google`. Verify it with `google-auth-library` (`verifyIdToken` with `GOOGLE_CLIENT_ID`); require `email_verified: true`. Find the user by `OAuthAccount` (`provider: GOOGLE`, `providerUserId` = the Google `sub`), never by email alone. If none: if a **verified** local user has that email, link to it; if an **unverified** local user has that email, link to it **and clear its password hash and add 1 to `tokenVersion`** (this stops an attacker who registered with a victim's email first); otherwise create a new user with `emailVerified: true` and no password. Then issue the normal tokens.
+
+**Check by hand:**
+- An unverified user trying to hold seats, create an order or review: 403 `EMAIL_NOT_VERIFIED`.
+- Register, copy the link from the worker terminal, call verify: `emailVerified` is true in `mongosh`. Use the same link again: refused. Edit `expiresAt` to the past: refused.
+- Resend for a real and a made-up email: the same response; a 4th request in an hour: 429.
+- Forgot then reset: the old password stops working, the old tokens stop working (`tokenVersion` increased).
+- Google: first sign-in creates a user and an `OAuthAccount`; a second sign-in creates nothing new; a tampered or expired Google token: 401.
+- Pre-hijack case: register `a@b.com` by password (unverified), then Google-sign-in as `a@b.com`: one user, the password hash is gone.
+
+**Concepts:** 1 (authentication), 16 (queue for email)
+
+**Done when:** unverified users cannot book, emails travel through the queue, and Google sign-in links accounts safely.
+
+### Week 10: Bloom filter and write-behind view counts
+
+**Goal:** random ids never reach MongoDB, and views are counted without a database write per view.
+
+**Models to add:** `ProcessedBatch`.
+
+**Files to write:** `models/ProcessedBatch.ts`; `cache/bloomFilter.ts`, `viewCounter.ts` and `workers/flushViews.ts` (already in the reference); changes to `server.ts`, `movieController.ts`, `adminCatalogController.ts`, `adminPromoController.ts`, `orderController.ts`.
+
+**Rules to implement:**
+- **Bloom filter at start-up:** in `server.ts`, after Redis is ready, load every movie id and every coupon code from MongoDB with `bloomAddMany` (`bloom:movies`, `bloom:coupons`). It also sets a "ready" marker. Until that marker exists (a fresh or wiped Redis), every check answers "maybe", so real movies never turn into 404s.
+- **Add before you save:** `createMovie` and `createCoupon` call `bloomAdd` first, then save. If the save fails, the extra entry is harmless.
+- **Use it:** `getMovie` asks `bloomMightContain` first and answers 404 straight away on "definitely not", before the cache or MongoDB. `applyCoupon` does the same with the code (and still gives the same generic 422). A "maybe" always continues to the real check.
+- **Views:** `getMovie` calls `countView(id)` (without waiting on it). The worker's `startViewFlusher` writes the totals to MongoDB every 10 seconds under a Redis lock. The code is in the reference; make sure `workerMain.ts` starts it.
+- Write in your notes what the batch id and the `ProcessedBatch` insert protect against (a batch written twice after a crash).
+
+**Check by hand:**
+- Request 1,000 random 24-character ids: all 404 and the MongoDB query count stays flat (use `db.setProfilingLevel(2)` or look at the server log).
+- Request every real movie id: all found (no false 404). Create a movie and open it straight away: found.
+- Delete the filter (`redis-cli DEL bloom:movies bloom:movies:ready`): movies still load (an unready filter answers "maybe"). Restart the API to rebuild it.
+- View a movie 100 times: `redis-cli HGET views:pending <id>` rises; after up to 10 seconds `viewCount` in MongoDB rose by exactly 100.
+- Run two workers: only one prints "flushed" per 10 seconds (the lock).
+- Kill the worker in the middle of a flush and start it again: the final count equals the views sent (no loss, no double count).
+
+**Concepts:** 11 (Bloom filter), 12 (write-behind), 14 (distributed lock)
+
+**Done when:** random ids never touch MongoDB and 100 views become one database write.
+
+### Week 11: Refunds, show cancellation and account deletion
+
+**Goal:** cancelling a show refunds every paying customer reliably; failed refunds can be retried; users can delete their account.
+
+**Models to add:** `Refund`.
+
+**Files to write:** `models/Refund.ts`; `adminVenueController.ts` (`cancelShow`, full version); `adminOrderController.ts` (`listRefunds`, `retryRefund`); `meController.ts` (`deleteMyAccount`); the `processRefund` job is already in `orderWorker.ts`.
+
+**Routes to build this week** (they already exist as stubs; replace each stub with the real handler):
+
+| Method and path | Who | Handler | What it does |
+|---|---|---|---|
+| DELETE /api/me | logged in | `deleteMyAccount` | anonymise: placeholder name and email, clear the password, `status: DELETED`, delete watchlist, signals and OAuth rows; orders stay |
+| GET /api/admin/refunds | admin | `listRefunds` | filter by status (look for `FAILED`) |
+| POST /api/admin/refunds/:id/retry | admin | `retryRefund` | put a `FAILED` refund back to `PENDING` and queue it again |
+
+**Rules to implement:**
+- **Cancel show (full version):** set the show `CANCELLED`. For every `PAID` or `CONFIRMED` order of the show: conditional update to `REFUND_PENDING`, set the tickets `cancelledAt`, create a `Refund` (`reason: SHOW_CANCELLED`, unique per order) and a `refund.requested` outbox row. For every `PENDING_PAYMENT` order: expire it (release the hold and the coupon). Do the order updates in batches, not one giant transaction.
+- **Refund job:** `processRefund` (in the reference) is idempotent. With the fake provider it always succeeds. To practise failures, temporarily make it throw for one chosen refund, watch the retries in the worker terminal, and see the refund become `FAILED` after the last try.
+- **Admin refunds:** list with a status filter; `retry` only works on a `FAILED` refund: set it back to `PENDING`, reset `attempts`, save a new outbox row.
+- **User cancel after payment:** not allowed in this project (say so in the README); only a cancelled show refunds.
+- **Delete my account:** set `status: DELETED`, replace `name` with `Deleted user` and `email` with `deleted+<id>@invalid`, clear the password hash, add 1 to `tokenVersion`; delete the user's `OAuthAccount`, `EmailToken`, `Watchlist` and `UserMovieSignal` rows; set `Review.userName` to `Deleted user`. Orders and tickets stay (financial records).
+
+**Check by hand:**
+- Book tickets for two shows with two users, cancel one show as admin: its orders become `REFUND_PENDING`, then `REFUNDED`; the other show is untouched; payments `REFUNDED`; tickets cancelled; scanning a cancelled ticket is refused.
+- Stop the worker before cancelling: the refunds wait; start it: all processed once.
+- Force a failing refund: retries at growing gaps in the worker terminal, then `FAILED`; retry it as admin after removing the failure: `PROCESSED`.
+- Delete an account: the user cannot log in, reviews show `Deleted user`, the orders are still in `mongosh`.
+
+**Concepts:** 16 (queue retries), 17 (outbox)
+
+**Done when:** cancelling a show refunds everyone exactly once, even with workers stopping and restarting.
+
+### Week 12: Load balancing, the payment webhook and the final demos
+
+**Goal:** three API copies and two workers run together; the real payment webhook is safe against repeats.
+
+**Models to add:** none.
+
+**Files to write:** `nginx/nginx.conf` and the `nginx` block in `docker-compose.yml` (code reference, section 1); `controllers/webhookController.ts`.
+
+**Routes to build this week** (they already exist as stubs; replace each stub with the real handler):
+
+| Method and path | Who | Handler | What it does |
+|---|---|---|---|
+| POST /api/webhooks/payments | payment provider | `handlePaymentWebhook` | check the signature on the raw body, insert a `PaymentEvent` (a repeat is refused), call `confirmPayment` |
+
+**Rules to implement:**
+- **Webhook (`POST /api/webhooks/payments`):** the route receives the raw body (see `app.ts`). Compute an HMAC-SHA256 of the raw body with `RAZORPAY_WEBHOOK_SECRET` and compare it to the signature header (use a constant-time comparison); a wrong signature gives 400 and nothing changes. Insert a `PaymentEvent` with the provider's event id: a duplicate-key error means "already seen", so answer 200 and stop. Look up the `Payment` by `providerOrderId`, call `confirmPayment`, mark the event `PROCESSED` (or `IGNORED` if the payment is unknown). Always answer 200 quickly for events you handled, so the provider stops retrying.
+- **Razorpay test mode (optional):** create a Razorpay order in `payOrder` when `provider` is `RAZORPAY`, use a tunnel (ngrok or cloudflared) so the provider can reach your laptop, and add the webhook URL in its dashboard. Without Razorpay, send a hand-made webhook with the correct HMAC from a small shell command; the fake pay button remains.
+- **Load balancer:** start nginx in Docker, three API copies (ports 5001 to 5003, `TRUST_PROXY=1`) and two workers; call `http://localhost:8080`.
+
+**Check by hand:**
+- Send the same webhook 20 times (`autocannon -a 20`): exactly one `PAID` transition, one `PaymentEvent`, one set of tickets.
+- Send a webhook with a wrong signature: 400, nothing changes.
+- `for i in 1 2 3 4 5 6; do curl -si localhost:8080/healthz | grep X-Served-By; done` shows all three copies.
+- Kill one API copy while `autocannon` runs against nginx: a few failures at most, then traffic continues.
+- Run the seat race through nginx with the three copies: still exactly one winner (Redis is shared).
+- The login rate limit is shared: 3 attempts through one copy and 3 through another make the 6th attempt 429.
+- With two workers running, pay for 10 orders: each order has exactly its tickets once.
+
+**Concepts:** 13 (load balancing), 15 (webhook)
+
+**Done when:** every demo in section 3 works, and you can explain each one.
+
+## Frontend (after the backend is finished)
+
+Build against the live API, using your known-good Postman requests as the reference. Every page needs a loading state, an empty state and an error state (stop the API and reload), and must work at phone width. Keep the access token in `AuthContext` memory (never `localStorage`); send `credentials: 'include'`; on a 401 call refresh once, retry, otherwise go to login (never loop).
+
+### Week 13: Foundation, accounts, home and movie detail
+
+- Vite + React + TypeScript project; `utils/index.ts` exports `baseURL`; `AuthContext` (token in memory, refresh on page load); `Navbar` (shows login, or the user name and logout, or admin links by role); router with the URLs in the code reference, section 12.
+- `LoginPage`, `RegisterPage`, check-your-email message, `VerifyEmailPage` (reads `?token=`, calls verify), `ForgotPasswordPage`, `ResetPasswordPage`, Continue with Google (Google Identity Services button gives the ID token, send it to `/auth/google`), profile page (change name, change password, delete account).
+- `HomePage`: now showing and upcoming rows, genre rows, offers banner. `MovieDetailPage` (`MovieHeader`, `MovieSections`, cast strip with links to `PersonPage`, rating summary, watchlist button using `inWatchlist`). `PersonPage`.
+
+**Done when:** register, verify through the worker terminal link, log in, refresh the page and stay logged in, open a movie.
+
+### Week 14: Reviews, search, watchlist and showtimes
+
+- `ReviewList` (sort, load more), `RatingModal` (1 to 10, text), helpful vote, report; show the verified-viewer badge and a login prompt for guests; show `EMAIL_NOT_VERIFIED` with a resend button.
+- `SearchPage` with filters (genre, language) and paging; `WatchlistPage`; `RecommendationRow` on the home page for logged-in users; "more like this" on the movie page.
+- `ShowtimesPage`: pick a date and city, theatres with their times.
+
+**Done when:** write a review, search by text, add to the watchlist, reach a showtime list.
+
+### Week 15: The booking flow
+
+- `SeatSelectionPage` with `SeatMap` (sold, held, available, selected; maximum 6; keyboard friendly; text labels, not colour alone); the hold call; a countdown from the server's `expiresAt`; on 409 clear the selection and refresh the map (poll every few seconds, or on focus).
+- `CheckoutPage`: order summary from the server, `CouponInput` with the generic error, `PriceBreakdown`, a UUID `Idempotency-Key` generated once per attempt, the pay button (disabled while the request runs), result and failure screens (`HOLD_EXPIRED`, `SEATS_TAKEN`).
+- `MyTicketsPage`: orders with status, tickets with the QR image and ticket code, cancel for pending orders.
+
+**Done when:** book a ticket end to end in the browser; a double click on Pay creates one order.
+
+### Week 16: Admin and manager pages, polish and the demo
+
+- `AdminPage` with tabs by role: **admin**: users (search, change role and status), people, movies (with cast editor), coupons, offers, reported reviews, orders, refunds, dashboard numbers. **Manager and admin**: theatres, screens (layout form), shows (create, list, change prices, cancel), ticket scanner (type or paste the ticket code).
+- Polish: loading, empty and error states everywhere, phone layout, consistent messages from `message`.
+- README with setup steps and screenshots, a short demo video, the resume line.
+
+**Done when:** a stranger could book a ticket without help, and an admin could run the whole catalog from the browser.
+
+**If you run short on time, cut in this order:** the Razorpay part of Week 12, Google login, recommendations, the refund retry screens, the Bloom filter. Never cut holds, orders, payment confirmation, tickets, the worker or rate limiting.
 
 ## 9. Checking your work by hand
 
@@ -685,7 +1195,7 @@ npx autocannon -c 50 -a 50 -m POST \
 ```
   One user repeating the same hold would replace their own hold, so for a fair race use a few different user tokens. Expect exactly one 2xx for the seat and the rest 409.
 - **Rate limit demo:** the same command against `/api/auth/login` with `-a 10`; expect 429 after the 5th.
-- **Load balancer demo:** `for i in 1 2 3 4 5 6; do curl -si localhost:8080/health | grep X-Served-By; done`.
+- **Load balancer demo:** `for i in 1 2 3 4 5 6; do curl -si localhost:8080/healthz | grep X-Served-By; done`.
 - **Cache demo:** open the same movie twice; `redis-cli TTL movie:<id>`.
 - **Queue checks:**
   - Stop the worker, pay for an order, then look: `db.orders` says `PAID`, `db.outboxevents` has a row with `published: false`, no tickets yet. Start the worker: tickets appear, the email prints in the worker terminal, the outbox row becomes `published: true`.
@@ -695,90 +1205,156 @@ npx autocannon -c 50 -a 50 -m POST \
 
 ## 10. API (routes)
 
-"fail closed" means the request is blocked if Redis is down; everything else lets the request through. "Global" means the whole `/api` area is limited to 300 requests per minute per IP (in `app.ts`).
+"fail closed" means the request is blocked if Redis is down; everything else lets the request through. "Global" means the whole `/api` area is limited to 300 requests per minute per IP (in `app.ts`). **The Week column says when you build it.**
 
 ### 10.1 Every route
 
-| Method and path | Who | Limit | Handler | What it does |
-|---|---|---|---|---|
-| **Auth** `/api/auth` | | | | |
-| POST `/register` | public | 5 per hour per IP, fail closed | `registerUser` | create the user (email lowercased, bcrypt hash), create a `VERIFY` token, queue the verification email |
-| POST `/login` | public | 5 per minute per IP, fail closed | `loginUser` | check the password; return the access token and set the refresh cookie; set `lastLoginAt` |
-| POST `/refresh` | refresh cookie | 30 per minute per IP | `refreshToken` | new access token if the cookie is valid and `tokenVersion` matches |
-| POST `/logout` | logged in | none | `logoutUser` | add 1 to `tokenVersion`, clear the cookie |
-| GET `/me` | logged in | none | `getCurrentUser` | the current user |
-| POST `/verify-email` | public | 10 per hour per IP | `verifyEmail` | hash the token, find it, check expiry and `usedAt`, mark the user verified |
-| POST `/resend-verification` | public | 3 per hour per IP, fail closed | `resendVerification` | same answer whether or not the email exists |
-| POST `/forgot-password` | public | 3 per hour per IP, fail closed | `forgotPassword` | create a `RESET` token, queue the email; same answer either way |
-| POST `/reset-password` | public | 5 per hour per IP, fail closed | `resetPassword` | check the token, set the new hash, add 1 to `tokenVersion` |
-| POST `/google` | public | 10 per minute per IP, fail closed | `googleLogin` | check the Google ID token, find the user by Google `sub` in `OAuthAccount`, or create or link one |
-| **Movies** `/api/movies` | | | | |
-| GET `/` | public | global; search queries 60 per minute per IP | `listMovies` | optional text search `q` plus `genre`, `language`, `status` filters; paging `page`, `limit` |
-| GET `/:id` | public | global | `getMovieById` | Bloom filter, then cache, then MongoDB; counts a view |
-| GET `/:id/similar` | public | global | `getSimilarMovies` | movies that share genres, best rated first |
-| GET `/:id/shows?city=&date=` | public | global | `listShowsForMovie` | showtimes grouped by theatre |
-| GET `/:id/reviews` | public | global | `listReviews` | `sort` by recent, helpful or rating; paged |
-| PUT `/:id/reviews/me` | verified user | 10 per hour per user | `saveMyReview` | create or update my review; adjust the rating totals; set `verifiedViewer` from my orders |
-| DELETE `/:id/reviews/me` | logged in | none | `deleteMyReview` | delete it, take it out of the totals |
-| **People and reviews** | | | | |
-| GET `/api/people/:id` | public | global | `getPersonById` | bio and the movies this person worked on (`cast.personId`, `crew.personId`) |
-| POST `/api/reviews/:id/helpful` | verified user | 30 per hour per user | `voteReviewHelpful` | toggle my vote; `helpfulCount` changes by `$inc` only if the vote row changed |
-| POST `/api/reviews/:id/report` | verified user | 10 per hour per user | `reportReview` | add a `ReviewReport`; `reportCount` goes up by 1 |
-| **Watchlist** `/api/watchlist` (all need login) | | | | |
-| GET `/` | logged in | global | `getWatchlist` | my watchlist |
-| POST `/` | logged in | global | `addToWatchlist` | body `{ movieId }`; adding twice does nothing; records a `WATCHLIST` signal |
-| GET `/:movieId/status` | logged in | global | `checkWatchlistStatus` | returns `{ inWatchlist: true or false }` |
-| DELETE `/:movieId` | logged in | global | `removeFromWatchlist` | 404 if it was not there |
-| **Shows** `/api/shows` | | | | |
-| GET `/:id` | public | global | `getShow` | the show with movie and theatre details |
-| GET `/:id/seats` | public | global | `getShowSeats` | sold seats from MongoDB, held seats from Redis (`getHeldSeatIds`) |
-| POST `/:id/scan` | admin or manager | global | `scanTicket` | one atomic update sets `usedAt` and `usedByUserId`; a second scan is refused |
-| **Holds** `/api/holds` | | | | |
-| POST `/` | verified user | 10 per minute per user | `holdSeats` | body `{ showId, seatIds }`; check the seats exist and are `AVAILABLE`, then `tryHold` |
-| DELETE `/:holdId` | logged in | global | `releaseHold` | `releaseHoldById` for my own hold |
-| **Orders** `/api/orders` (all need login) | | | | |
-| POST `/` | verified user | 10 per minute per user | `createOrder` | body `{ holdId }` plus header `Idempotency-Key`; creates `PENDING_PAYMENT`, extends the hold, saves `order.created` |
-| GET `/` | logged in | global | `listMyOrders` | my orders, newest first |
-| GET `/:id` | logged in | global | `getOrder` | only my own order |
-| POST `/:id/coupon` | logged in | 10 per minute per user, fail closed | `applyCoupon` | atomic claim of one use, a `RESERVED` redemption, recalculate the total |
-| DELETE `/:id/coupon` | logged in | global | `removeCoupon` | release the redemption and give the use back |
-| POST `/:id/pay` | logged in | global | `payOrder` | create the `Payment`; with the fake provider call `confirmPayment` straight away |
-| POST `/:id/cancel` | logged in | global | `cancelOrder` | cancel a pending order, release the hold and the coupon |
-| GET `/:id/tickets` | logged in | global | `listOrderTickets` | tickets with QR codes (`qrcode` package, from `ticketCode`) |
-| **Other** | | | | |
-| POST `/api/webhooks/payments` | payment provider | none | `handlePaymentWebhook` | check the signature on the raw body, insert a `PaymentEvent` (a repeat is refused), call `confirmPayment` |
-| GET `/api/offers` | public | global | `listOffers` | enabled offers in their date range, with the coupon code |
-| GET `/api/me/recommendations` | logged in | global | `getMyRecommendations` | genres from my `UserMovieSignal` rows, weighted |
-| GET `/health` | public | none | (in `app.ts`) | `{ mongo, redis }` |
-| **Admin only** `/api/admin` | | | | |
-| POST `/people` | admin | global | `createPerson` | add a person |
-| POST `/movies` | admin | global | `createMovie` | adds the id to the Bloom filter first |
-| PATCH `/movies/:id` | admin | global | `updateMovie` | also deletes the cache entry |
-| PUT `/movies/:id/cast` | admin | global | `setMovieCast` | replaces `cast` and `crew`, copying each person's name |
-| POST `/coupons` | admin | global | `createCoupon` | also adds the code to the Bloom filter |
-| GET `/coupons` | admin | global | `listCoupons` | all coupons |
-| PATCH `/coupons/:id` | admin | global | `updateCoupon` | enable, disable, change dates |
-| POST `/offers` | admin | global | `createOffer` | add an offer |
-| PATCH `/offers/:id` | admin | global | `updateOffer` | change or disable it |
-| GET `/reviews/reported` | admin | global | `listReportedReviews` | the moderation queue |
-| PATCH `/reviews/:id` | admin | global | `moderateReview` | hide or restore a review, resolve its reports |
-| **Admin or the theatre's manager** `/api/admin` | | | | |
-| POST `/theatres` | admin or manager | global | `createTheatre` | a manager can only create theatres they manage |
-| POST `/theatres/:id/screens` | admin or manager | global | `createScreen` | the controller checks `theatre.managerId` |
-| POST `/shows` | admin or manager | global | `createShow` | in a transaction: bump the screen's `showWriteVersion`, check for overlap, create the show and one `ShowSeat` per seat |
-| POST `/shows/:id/cancel` | admin or manager | global | `cancelShow` | mark the show cancelled; every paid order becomes `REFUND_PENDING` with a `Refund` and a queued job |
+**Implementation status (current baseline):**
+- `/healthz` and `/readyz` are implemented.
+- The auth handlers for register, login, refresh, logout and current user are mounted.
+- Profile and admin-user routes for Week 1 are not mounted yet.
+- Movie list/detail handlers are mounted; movie text search and the remaining catalog routes are not mounted yet.
+- Existing handler names are `createUser`, `loginUser`, `refresh`, `logout`, `fetchUser`, `getMovieList` and `getMovie`.
 
-### 10.2 Who can do what
+| Week | Method and path | Who | Limit | Handler | What it does |
+|---|---|---|---|---|---|
+| | **Auth** | | | | |
+| 1 | POST /api/auth/register | public | 5 per hour per IP, fail closed | `createUser` | validate, lowercase the email, bcrypt the password, create the user (`USER`, `ACTIVE`, not verified); 409 if the email exists |
+| 1 | POST /api/auth/login | public | 5 per minute per IP, fail closed | `loginUser` | check the password (same 401 for unknown email and wrong password); suspended users get 403; set `lastLoginAt`; return the access token and set the refresh cookie |
+| 1 | POST /api/auth/refresh | refresh cookie | 30 per minute per IP | `refresh` | new access token if the cookie is valid, the user is `ACTIVE` and `tokenVersion` matches |
+| 1 | POST /api/auth/logout | logged in | none | `logout` | add 1 to `tokenVersion`, clear the cookie |
+| 1 | GET /api/auth/me | logged in | none | `fetchUser` | the current user, without `passwordHash` or `tokenVersion` |
+| 9 | POST /api/auth/verify-email | public | 10 per hour per IP | `verifyEmail` | hash the token, find it, check expiry and `usedAt`, mark the user verified |
+| 9 | POST /api/auth/resend-verification | public | 3 per hour per IP, fail closed | `resendVerification` | same answer whether or not the email exists |
+| 9 | POST /api/auth/forgot-password | public | 3 per hour per IP, fail closed | `forgotPassword` | create a `RESET` token and queue the email; same answer either way |
+| 9 | POST /api/auth/reset-password | public | 5 per hour per IP, fail closed | `resetPassword` | check the token, set the new hash, add 1 to `tokenVersion` |
+| 9 | POST /api/auth/google | public | 10 per minute per IP, fail closed | `googleLogin` | check the Google ID token; find the user by Google `sub` in `OAuthAccount`, or link or create one |
+| | **My account** | | | | |
+| 1 | PATCH /api/me | logged in | global | `updateMyProfile` | change my `name` (nothing else can be changed here) |
+| 1 | POST /api/me/change-password | logged in | 5 per hour per user, fail closed | `changeMyPassword` | needs the current password; new password 8 to 72 characters; add 1 to `tokenVersion` and give back fresh tokens |
+| 7 | GET /api/me/recommendations | logged in | global | `getMyRecommendations` | genres from my `UserMovieSignal` rows, weighted; falls back to top rated |
+| 11 | DELETE /api/me | logged in | global | `deleteMyAccount` | anonymise: placeholder name and email, clear the password, `status: DELETED`, delete watchlist, signals and OAuth rows; orders stay |
+| | **Admin: users** | | | | |
+| 1 | GET /api/admin/users | admin | global | `listUsers` | search by name or email, filter by `role` and `status`, paged |
+| 1 | GET /api/admin/users/:id | admin | global | `getUserById` | one user (no password hash) |
+| 1 | PATCH /api/admin/users/:id | admin | global | `updateUser` | change `role` (this is how someone becomes a `MANAGER`) or `status`; suspending adds 1 to `tokenVersion`; an admin cannot change their own role or status |
+| | **Movies** | | | | |
+| 2 | GET /api/movies | public | global | `getMovieList` | filters `genre`, `language`, `status`; `sort`; `page`, `limit` |
+| 2 | GET /api/movies/search?q= | public | 60 per minute per IP | `searchMovies` | MongoDB text search (this route is above `/:id` on purpose) |
+| 2 | GET /api/movies/:id | public | global | `getMovie` | Bloom filter (Week 10), cache (Week 8), then MongoDB; counts a view (Week 10) |
+| 7 | GET /api/movies/:id/similar | public | global | `getSimilarMovies` | movies that share genres, best rated first |
+| 4 | GET /api/movies/:id/shows?city=&date= | public | global | `listShowsForMovie` | showtimes grouped by theatre |
+| 3 | GET /api/movies/:id/reviews | public | global | `listReviews` | `VISIBLE` reviews; `sort` by recent, helpful or rating; paged |
+| 3 | PUT /api/movies/:id/reviews/me | verified user | 10 per hour per user | `saveMyReview` | create or update my review; adjust the rating totals; `verifiedViewer` from my orders (Week 6) |
+| 3 | DELETE /api/movies/:id/reviews/me | logged in | global | `deleteMyReview` | delete it and take it out of the totals |
+| | **People** | | | | |
+| 2 | GET /api/people/:id | public | global | `getPersonById` | bio and the movies this person worked on |
+| | **Reviews** | | | | |
+| 3 | POST /api/reviews/:id/helpful | verified user | 30 per hour per user | `voteReviewHelpful` | toggle my vote; `helpfulCount` changes only if the vote row changed |
+| 3 | POST /api/reviews/:id/report | verified user | 10 per hour per user | `reportReview` | one report per user per review; `reportCount` goes up by 1 |
+| | **Watchlist** | | | | |
+| 3 | GET /api/watchlist | logged in | global | `getWatchlist` | my watchlist, newest first |
+| 3 | POST /api/watchlist | logged in | global | `addToWatchlist` | body `{ movieId }`; adding twice does nothing; records a `WATCHLIST` signal (Week 7) |
+| 3 | GET /api/watchlist/:movieId/status | logged in | global | `checkWatchlistStatus` | returns `{ inWatchlist: true or false }` |
+| 3 | DELETE /api/watchlist/:movieId | logged in | global | `removeFromWatchlist` | 404 if it was not there |
+| | **Shows** | | | | |
+| 4 | GET /api/shows/:id | public | global | `getShow` | the show with movie, theatre and price tiers |
+| 4 | GET /api/shows/:id/seats | public | global | `getShowSeats` | sold seats from MongoDB, held seats from Redis (`getHeldSeatIds`) |
+| 6 | POST /api/shows/:id/scan | admin or manager | global | `scanTicket` | one atomic update sets `usedAt` and `usedByUserId`; a second scan is refused |
+| | **Holds** | | | | |
+| 5 | POST /api/holds | verified user | 10 per minute per user | `holdSeats` | body `{ showId, seatIds }`; the seats must exist, be `AVAILABLE` and belong to a show that has not started; then `tryHold` |
+| 5 | DELETE /api/holds/:holdId | logged in | global | `releaseHold` | `releaseHoldById` for my own hold |
+| | **Orders** | | | | |
+| 5 | POST /api/orders | verified user | 10 per minute per user | `createOrder` | body `{ holdId }` plus header `Idempotency-Key`; creates `PENDING_PAYMENT`, extends the hold, saves `order.created` |
+| 5 | GET /api/orders | logged in | global | `listMyOrders` | my orders, newest first, paged |
+| 5 | GET /api/orders/:id | logged in | global | `getOrder` | only my own order |
+| 5 | POST /api/orders/:id/cancel | logged in | global | `cancelOrder` | only my own `PENDING_PAYMENT` order; releases the hold and the coupon |
+| 6 | POST /api/orders/:id/pay | logged in | global | `payOrder` | create the `Payment`; with the fake provider call `confirmPayment` straight away |
+| 6 | GET /api/orders/:id/tickets | logged in | global | `listOrderTickets` | tickets with a QR code made from `ticketCode` |
+| 7 | POST /api/orders/:id/coupon | logged in | 10 per minute per user, fail closed | `applyCoupon` | atomic claim of one use, a `RESERVED` redemption, recalculate the total |
+| 7 | DELETE /api/orders/:id/coupon | logged in | global | `removeCoupon` | release the redemption and give the use back |
+| | **Other** | | | | |
+| 12 | POST /api/webhooks/payments | payment provider | none | `handlePaymentWebhook` | check the signature on the raw body, insert a `PaymentEvent` (a repeat is refused), call `confirmPayment` |
+| 7 | GET /api/offers | public | global | `listOffers` | enabled offers in their date range, with the coupon code |
+| 0 | GET /healthz | public | none | `(in `app.ts`)` | `{ status: 'ok' }` |
+| 0 | GET /readyz | public | none | `(in `app.ts`)` | MongoDB and Redis readiness |
+| | **Admin: catalog** | | | | |
+| 2 | POST /api/admin/people | admin | global | `createPerson` | name required; bio, photo and birth date optional |
+| 2 | GET /api/admin/people | admin | global | `listPeople` | search by name, paged |
+| 2 | PATCH /api/admin/people/:id | admin | global | `updatePerson` | if the name changes, update the copies in `Movie.cast` and `Movie.crew` |
+| 2 | DELETE /api/admin/people/:id | admin | global | `deletePerson` | refused (409) while the person is in any movie |
+| 2 | POST /api/admin/movies | admin | global | `createMovie` | validate; add the id to the Bloom filter first (Week 10); then save |
+| 2 | PATCH /api/admin/movies/:id | admin | global | `updateMovie` | change any field except ratings and `viewCount`; delete the cache entry (Week 8) |
+| 2 | DELETE /api/admin/movies/:id | admin | global | `deleteMovie` | refused while the movie has shows: set `status: ENDED` instead; otherwise delete it with its reviews and watchlist rows |
+| 2 | PUT /api/admin/movies/:id/cast | admin | global | `setMovieCast` | replace `cast` and `crew`; copy each person's name; at most 50 and 20 |
+| | **Admin: reviews** | | | | |
+| 3 | GET /api/admin/reviews/reported | admin | global | `listReportedReviews` | reviews with `reportCount` above 0, most reported first |
+| 3 | PATCH /api/admin/reviews/:id | admin | global | `moderateReview` | set `status` to `HIDDEN` or `VISIBLE`; mark its reports `RESOLVED` |
+| 3 | DELETE /api/admin/reviews/:id | admin | global | `deleteReview` | delete it and take it out of the rating totals |
+| | **Admin or manager: venues** | | | | |
+| 4 | POST /api/admin/theatres | admin or manager | global | `createTheatre` | a manager can only create theatres that they manage; an admin names the manager |
+| 4 | GET /api/admin/theatres | admin or manager | global | `listTheatres` | an admin sees all, a manager sees their own |
+| 4 | GET /api/admin/theatres/:id | admin or manager | global | `getTheatre` | one theatre (managers: only their own) |
+| 4 | PATCH /api/admin/theatres/:id | admin or manager | global | `updateTheatre` | name, city, address; only an admin can change `managerId` |
+| 4 | DELETE /api/admin/theatres/:id | admin or manager | global | `deleteTheatre` | refused (409) while the theatre has any show |
+| 4 | POST /api/admin/theatres/:id/screens | admin or manager | global | `createScreen` | 1 to 20 sections; `totalSeats` is calculated |
+| 4 | GET /api/admin/theatres/:id/screens | admin or manager | global | `listScreens` | the screens of one theatre |
+| 4 | PATCH /api/admin/screens/:id | admin or manager | global | `updateScreen` | the name any time; the layout only while the screen has no shows |
+| 4 | DELETE /api/admin/screens/:id | admin or manager | global | `deleteScreen` | refused (409) while the screen has any show |
+| 4 | POST /api/admin/shows | admin or manager | global | `createShow` | one transaction: bump the screen's `showWriteVersion`, check for overlap, create the show and one `ShowSeat` per seat |
+| 4 | GET /api/admin/shows | admin or manager | global | `listShows` | filter by theatre, movie, date and status; managers see only their theatres |
+| 4 | PATCH /api/admin/shows/:id | admin or manager | global | `updateShow` | price tiers and `highDemand`, only while no seat is sold |
+| 4 | POST /api/admin/shows/:id/cancel | admin or manager | global | `cancelShow` | Week 4: only if no order is paid. Week 11: refunds every paid order |
+| | **Admin: coupons and offers** | | | | |
+| 7 | POST /api/admin/coupons | admin | global | `createCoupon` | validate dates and value; add the code to the Bloom filter first (Week 10) |
+| 7 | GET /api/admin/coupons | admin | global | `listCoupons` | filter by `enabled`, paged |
+| 7 | GET /api/admin/coupons/:id | admin | global | `getCoupon` | one coupon with `usedCount` |
+| 7 | PATCH /api/admin/coupons/:id | admin | global | `updateCoupon` | enable or disable, change dates, limits and rules; the `code` cannot change |
+| 7 | DELETE /api/admin/coupons/:id | admin | global | `deleteCoupon` | refused (409) if it was ever redeemed: disable it instead |
+| 7 | POST /api/admin/offers | admin | global | `createOffer` | title, dates, optional coupon |
+| 7 | GET /api/admin/offers | admin | global | `listAllOffers` | all offers, including disabled ones |
+| 7 | PATCH /api/admin/offers/:id | admin | global | `updateOffer` | change or disable it |
+| 7 | DELETE /api/admin/offers/:id | admin | global | `deleteOffer` | delete it |
+| | **Admin: orders and dashboard** | | | | |
+| 5 | GET /api/admin/orders | admin | global | `listOrders` | filter by status, date, user and show; paged |
+| 5 | GET /api/admin/orders/:id | admin | global | `getOrderDetails` | the order with its history, payment, tickets and refund |
+| 8 | GET /api/admin/stats | admin | global | `getStats` | counts of users, movies, shows today, orders by status, and revenue; cached for 60 seconds |
+| 11 | GET /api/admin/refunds | admin | global | `listRefunds` | filter by status (look for `FAILED`) |
+| 11 | POST /api/admin/refunds/:id/retry | admin | global | `retryRefund` | put a `FAILED` refund back to `PENDING` and queue it again |
+
+**Totals:** 85 API routes with a handler (41 of them admin or manager routes), plus `/healthz` and `/readyz`. The planned API route stubs remain to be built week by week.
+
+### 10.2 Create, read, update, delete for every resource
+
+| Resource | Create | Read | Update | Delete |
+|---|---|---|---|---|
+| **User** | `POST /auth/register` (public) | `GET /auth/me`; admin `GET /admin/users`, `/:id` | me: `PATCH /me` (name), `POST /me/change-password`; admin: `PATCH /admin/users/:id` (`role`, `status`) | no hard delete: `DELETE /me` anonymises the account; an admin suspends instead |
+| **Person** | admin `POST /admin/people` | public `GET /people/:id`; admin `GET /admin/people` | admin `PATCH` (also fixes the name copies in movies) | admin `DELETE`, refused while the person is in a movie |
+| **Movie** | admin `POST /admin/movies` | public list, search, detail, similar | admin `PATCH`; `PUT /admin/movies/:id/cast` | admin `DELETE`, refused while it has shows (set `ENDED` instead) |
+| **Review** | `PUT /movies/:id/reviews/me` | public list | the same `PUT` again; admin `PATCH` hides or restores | own `DELETE`; admin `DELETE` |
+| **Review vote, report** | `POST /reviews/:id/helpful`, `/report` | admin reported list | helpful is a toggle | the toggle removes the vote |
+| **Watchlist** | `POST /watchlist` | `GET /watchlist`, `/:movieId/status` | none | `DELETE /watchlist/:movieId` |
+| **Theatre** | admin or manager `POST /admin/theatres` | admin or manager list and get | `PATCH` (only an admin changes the manager) | `DELETE`, refused while it has shows |
+| **Screen** | `POST /admin/theatres/:id/screens` | `GET /admin/theatres/:id/screens` | `PATCH` (layout locked once shows exist) | `DELETE`, refused while it has shows |
+| **Show** | admin or manager `POST /admin/shows` (creates the seats) | public `GET /shows/:id`, `/seats`, `/movies/:id/shows`; staff `GET /admin/shows` | `PATCH` prices only while no seat is sold | never deleted: `POST /admin/shows/:id/cancel` |
+| **Seat hold** | `POST /holds` | none (it lives in Redis) | none (creating an order extends it) | `DELETE /holds/:holdId`, or it expires |
+| **Order** | `POST /orders` | `GET /orders`, `/:id`; admin `GET /admin/orders`, `/:id` | none by hand: only the state machine changes it | `POST /orders/:id/cancel` while pending; never deleted |
+| **Payment, ticket** | created by the system | `GET /orders/:id/tickets` | `POST /shows/:id/scan` sets `usedAt` | none |
+| **Coupon** | admin `POST /admin/coupons` | admin list and get; public through `GET /offers` | admin `PATCH` (not the code) | admin `DELETE`, refused if it was ever used (disable it) |
+| **Offer** | admin `POST /admin/offers` | public `GET /offers`; admin `GET /admin/offers` | admin `PATCH` | admin `DELETE` |
+| **Refund** | created by the system | admin `GET /admin/refunds` | admin `POST /admin/refunds/:id/retry` | none |
+
+### 10.3 Who can do what
 
 | Role | Can do |
 |---|---|
 | Not logged in | browse movies, people, reviews, showtimes, seat maps and offers; register, log in, verify email, reset password |
-| `USER` (verified email) | everything above, plus review, vote on reviews, report, use the watchlist, hold seats, create orders, pay, apply coupons, see own tickets |
+| `USER` (verified email) | everything above, plus review, vote on reviews, report, use the watchlist, hold seats, create orders, pay, apply coupons, see own tickets, edit own profile and password |
 | `USER` (email not verified) | browse, watchlist, see own orders; blocked from holds, orders and reviews with `EMAIL_NOT_VERIFIED` |
-| `MANAGER` | everything a user can do, plus create theatres and screens (only for theatres they manage), create and cancel shows, scan tickets |
-| `ADMIN` | everything, plus the catalog (movies, people, cast), coupons, offers and review moderation |
+| `MANAGER` | everything a user can do, plus create and edit **their own** theatres, screens and shows, cancel shows, scan tickets |
+| `ADMIN` | everything, plus users, people, movies, coupons, offers, review moderation, all orders, refunds and the dashboard |
 
-The route files that implement this table are in `queueskip_code_reference.md`, section 8.
+The route files that implement this are in `queueskip_code_reference.md`, section 8.
 
 ## 11. Interview questions this plan prepares you for
 
