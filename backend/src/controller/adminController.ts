@@ -1,6 +1,13 @@
 import type { RequestHandler } from "express";
-import { getUserByIdService } from "../service/adminService";
+import { getUserByIdService, listUsersService } from "../service/adminService";
 import { validateObjectId } from "../validators/common";
+import { listUsersQuerySchema } from "../validators/admin";
+
+export const listUsers: RequestHandler = async (req, res): Promise<void> => {
+    const result = await listUsersService(listUsersQuerySchema.parse(req.query));
+
+    res.status(200).json(result);
+};
 
 export const getUserById: RequestHandler = async (req, res): Promise<void> => {
 
