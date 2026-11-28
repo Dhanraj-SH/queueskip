@@ -10,3 +10,4 @@ export const updateProfile = z.object({
 });
 
 export type ChangePasswordData = z.infer<typeof changePassword>;
+export type UpdateProfileData = z.infer<typeof updateProfile>;

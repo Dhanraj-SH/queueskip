@@ -14,7 +14,7 @@ const issueToken = (user: UserDocument) => {
             name: user.name,
             email: user.email,
         },
-        accessToken: generateAccessToken(user.id, user.tokenVersion),
+        accessToken: generateAccessToken(user.id, user.role, user.tokenVersion),
         refreshToken: generateRefreshToken(user.id, user.tokenVersion),
     };
 };
@@ -40,7 +40,15 @@ export const createUserService = async (userData: RegisterUserData) => {
 export const loginUserService = async (loginData: LoginUserData) => {
     const user = await findUserByEmailForLogin(loginData.email);
 
-    if (!user?.passwordHash || user.status !== userStatus.active) {
+    if (!user?.passwordHash) {
+        throw new AppError('Invalid credentials', 401);
+    }
+
+    if (user.status === userStatus.suspended) {
+        throw new AppError('Account is suspended', 403);
+    }
+
+    if (user.status !== userStatus.active) {
         throw new AppError('Invalid credentials', 401);
     }
 
@@ -64,7 +72,7 @@ export const refreshSessionService = async (refreshToken: string): Promise<strin
         throw new AppError('Refresh token is no longer valid', 401);
     }
 
-    return generateAccessToken(user._id.toString(), user.tokenVersion);
+    return generateAccessToken(user._id.toString(), user.role, user.tokenVersion);
 };
 
 export const logoutSessionService = async (refreshToken: string | undefined): Promise<void> => {

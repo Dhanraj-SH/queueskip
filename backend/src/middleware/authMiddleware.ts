@@ -1,14 +1,15 @@
 import type { Request, RequestHandler } from 'express';
 import jwt from 'jsonwebtoken';
-import { userStatus } from '../utils/constants';
+import { userRole, userStatus, type UserRole } from '../utils/constants';
 import { findUserById } from '../repositories/userRepositories';
 import { env } from '../config/env';
 import { AppError } from '../utils/appError';
 
-const isAccessTokenPayload = ( payload: string | jwt.JwtPayload ): payload is jwt.JwtPayload & { userId: string; tokenVersion: number } =>
+const isAccessTokenPayload = ( payload: string | jwt.JwtPayload ): payload is jwt.JwtPayload & { userId: string; role: UserRole; tokenVersion: number } =>
     typeof payload !== 'string' &&
     typeof payload.userId === 'string' &&
     /^[a-f\d]{24}$/i.test(payload.userId) &&
+    (payload.role === userRole.user || payload.role === userRole.manager || payload.role === userRole.admin) &&
     typeof payload.tokenVersion === 'number' &&
     Number.isInteger(payload.tokenVersion) &&
     payload.tokenVersion >= 0;

@@ -15,4 +15,10 @@ export const listUsersQuerySchema = z.object({
     limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
-export type ListUsersQuery = z.infer<typeof listUsersQuerySchema>;
+export const adminUsersUpdate = z.object({
+    role: z.enum(userRoleValues).optional(),
+    status: z.enum(userStatusValues).optional()
+});
+
+export type ListUsersQueryData = z.infer<typeof listUsersQuerySchema>;
+export type UpdateUserData = z.infer<typeof adminUsersUpdate>;

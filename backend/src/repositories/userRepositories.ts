@@ -1,8 +1,8 @@
 import User, { type UserRecord } from '../models/User';
 import type { FilterQuery, HydratedDocument } from 'mongoose';
-import { userRole } from '../utils/constants';
+import { userRole, userStatus } from '../utils/constants';
 import { escapeRegex } from '../utils/escapeRegex';
-import type { ListUsersQuery } from '../validators/admin';
+import type { ListUsersQueryData, UpdateUserData } from '../validators/admin';
 
 export type UserDocument = HydratedDocument<UserRecord>;
 
@@ -26,7 +26,7 @@ export const hasAdminUser = async (): Promise<boolean> => {
     return (await User.exists({ role: userRole.admin })) !== null;
 };
 
-export const listUsers = async (query: ListUsersQuery) => {
+export const listUsers = async (query: ListUsersQueryData) => {
     const { q, role, status, page, limit } = query;
     const filter: FilterQuery<UserRecord> = {};
 
@@ -86,6 +86,20 @@ export const updateUserProfile = async(userId: string, name: string): Promise<Us
         { returnDocument: "after", runValidators: true }
     );
 };
+
+export const updateUserById = async(userId: string, updateData: UpdateUserData): Promise<UserDocument | null> => {
+    return await User.findByIdAndUpdate(
+        userId,
+        {
+            $set: {
+                ...(updateData.role !== undefined ? { role: updateData.role } : {}),
+                ...(updateData.status !== undefined ? { status: updateData.status } : {})
+            },
+            ...(updateData.status === userStatus.suspended ? { $inc: { tokenVersion: 1 } } : {}),
+        },
+        { returnDocument: "after", runValidators: true }
+    );
+}
 
 export const incrementTokenVersion = async (userId: string): Promise<void> => {
     await User.findOneAndUpdate({ _id: userId }, { $inc: { tokenVersion: 1 } });

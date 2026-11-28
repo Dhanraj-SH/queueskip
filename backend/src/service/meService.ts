@@ -2,7 +2,7 @@ import argon2 from 'argon2';
 import { changeUserPassword, findUserById, findUserByIdForPasswordChange, updateUserProfile } from "../repositories/userRepositories";
 import { AppError } from "../utils/appError";
 import { userStatus } from "../utils/constants";
-import { ChangePasswordData } from "../validators/me";
+import type { ChangePasswordData, UpdateProfileData } from "../validators/me";
 import { generateAccessToken } from "../utils/generateAccessToken";
 import { generateRefreshToken } from "../utils/generateRefreshToken";
 
@@ -27,12 +27,12 @@ export const changeMyPasswordService = async (userId: string, password: ChangePa
     }
 
     return {
-        accessToken: generateAccessToken(updatedUser.id, updatedUser.tokenVersion),
+        accessToken: generateAccessToken(updatedUser.id, updatedUser.role, updatedUser.tokenVersion),
         refreshToken: generateRefreshToken(updatedUser.id, updatedUser.tokenVersion),
     };
 };
 
-export const updateMyProfileService = async(userId: string, newData: any) => {
+export const updateMyProfileService = async(userId: string, newData: UpdateProfileData) => {
     const user = await findUserById(userId);
 
     if(!user || user.status !== userStatus.active){
