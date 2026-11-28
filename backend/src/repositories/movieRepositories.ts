@@ -1,5 +1,5 @@
 import Movie from '../models/Movie';
-import type { ListMovieQuery } from '../validators/movie';
+import type { ListMovieQuery, SearchMovieQuery } from '../validators/movie';
 
 export const listMovie = async (query: ListMovieQuery) => {
     const { q, genre, language, certification, status, sortBy, order, page, limit } = query;
@@ -55,4 +55,29 @@ export const listMovie = async (query: ListMovieQuery) => {
 
 export const getMovieById = async(movieId: string) => {
     return await Movie.findById(movieId);
+};
+
+export const searchMovies = async (query: SearchMovieQuery) => {
+    const { q, page, limit } = query;
+    const filter = { $text: { $search: q } };
+    const skip = (page - 1) * limit;
+
+    const [movies, total] = await Promise.all([
+        Movie.find(filter, { score: { $meta: 'textScore' } })
+            .sort({ score: { $meta: 'textScore' } })
+            .skip(skip)
+            .limit(limit)
+            .lean(),
+        Movie.countDocuments(filter),
+    ]);
+
+    return {
+        movies,
+        meta: {
+            page,
+            limit,
+            total,
+            totalPages: Math.ceil(total / limit),
+        },
+    };
 };

@@ -1,6 +1,6 @@
 import type { RequestHandler } from 'express';
-import { fetchMovieService, listMovieService } from '../service/movieService';
-import { listMovieQuerySchema } from '../validators/movie';
+import { fetchMovieService, listMovieService, searchMoviesService } from '../service/movieService';
+import { listMovieQuerySchema, searchMovieQuerySchema } from '../validators/movie';
 import { validateObjectId } from '../validators/common';
 
 export const getMovieList: RequestHandler = async (req, res, next): Promise<void> => {
@@ -33,6 +33,16 @@ export const getMovie: RequestHandler = async (req, res, next): Promise<void> =>
             movie
         });
     } catch(error) {
+        next(error);
+    }
+};
+
+export const searchMovies: RequestHandler = async (req, res, next): Promise<void> => {
+    try {
+        const result = await searchMoviesService(searchMovieQuerySchema.parse(req.query));
+
+        res.status(200).json(result);
+    } catch (error) {
         next(error);
     }
 };

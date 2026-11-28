@@ -31,3 +31,12 @@ export const listMovieQuerySchema = paginationSchema.extend({
 });
 
 export type ListMovieQuery = z.infer<typeof listMovieQuerySchema>;
+
+export const searchMovieQuerySchema = paginationSchema.extend({
+    q: z.preprocess(
+        (value) => (typeof value === 'string' ? value.trim() : value),
+        z.string().min(1).max(100),
+    ),
+});
+
+export type SearchMovieQuery = z.infer<typeof searchMovieQuerySchema>;
